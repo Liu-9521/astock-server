@@ -1,8 +1,8 @@
 [Unit]
-Description=Daily astock backup at 03:00
+Description=astock backup every 10 days at 03:00
 
 [Timer]
-OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-1,11,21 03:00:00
 Persistent=true
 
 [Install]
