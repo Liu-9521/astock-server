@@ -1,4 +1,12 @@
 # -*- coding: utf-8 -*-
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 """RSS 聚合推送：定时抓取 → 新条目推 Telegram。
 
 内存策略：脚本跑完即退出（oneshot），无常驻进程；峰值内存约 30MB，结束即释放。
@@ -25,11 +33,11 @@ import requests
 TOKEN = "8631214060:AAFGyR7cOvYP84H0LKQbjNC03K41UdIp2lU"
 CHAT_ID = 8687318272          # 你的 Telegram user_id
 WECOM_WEBHOOK = ("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-                 "?key=<WECOM_YOUR_KEY>")
+                 "?key=" + _secret("wecom_webhook_key"))
 PROXY = "socks5h://127.0.0.1:7890"
 
 # 英文源翻译成中文（DeepSeek 直连，不走代理）
-DEEPSEEK_KEY = "<DEEPSEEK_YOUR_KEY>"
+DEEPSEEK_KEY = _secret("deepseek_api_key")
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 DIGEST = "/opt/astock/rss_digest.json"
 PUSH_HOURS = {7, 20}

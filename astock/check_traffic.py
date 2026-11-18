@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 """夜煞云流量预警：超过阈值推送到企业微信（每小时检查一次）"""
 import json
 import os
@@ -9,7 +17,7 @@ import urllib.request
 
 SUB_URL = "https://45.137.180.144/L?ZG93bmxvYWRDb25maWcuanMvMzkzZGRhN2FmYjhhN2FmZTNjN2YxMTIxOTA5ODQzZmQ/dGltZXN0YW1wPTE0MjQ4NA=="
 WEBHOOK = ("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-           "?key=<WECOM_YOUR_KEY>")
+           "?key=" + _secret("wecom_webhook_key"))
 STATE = "/opt/astock/.traffic_warn.json"
 THRESHOLD = 80      # 百分比
 GB = 1024 ** 3

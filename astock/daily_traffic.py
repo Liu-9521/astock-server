@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 """每天早上发送代理流量日报到企业微信"""
 import json
 import ssl
@@ -8,7 +16,7 @@ import urllib.request
 
 SUB_URL = "https://45.137.180.144/L?ZG93bmxvYWRDb25maWcuanMvMzkzZGRhN2FmYjhhN2FmZTNjN2YxMTIxOTA5ODQzZmQ/dGltZXN0YW1wPTE0MjQ4NA=="
 WEBHOOK = ("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-           "?key=<WECOM_YOUR_KEY>")
+           "?key=" + _secret("wecom_webhook_key"))
 GB = 1024 ** 3
 
 

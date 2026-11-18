@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 # -*- coding: utf-8 -*-
 """公网登录保护：密码 + 微信验证码 + Cookie 会话 + 访问日志。
 
@@ -121,7 +129,7 @@ def _load_auth() -> dict:
         except Exception:
             pass
     conf = {
-        "password": "<QUANT_WEB_PASSWORD>",
+        "password": _secret("quant_password"),
         "secret": secrets.token_hex(16),
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -144,7 +152,7 @@ def password() -> str:
             return pw
     except Exception:  # noqa: BLE001
         pass
-    return str(AUTH.get("password") or "<QUANT_WEB_PASSWORD>")
+    return str(AUTH.get("password") or _secret("quant_password"))
 
 
 def log_access(ip: str, path: str, status, ua: str = "", note: str = "") -> None:

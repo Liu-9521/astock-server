@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 """金银价实时推送：抓新浪金价 + DeepSeek 预测未来一天走势 → 企业微信。
 
 用法：
@@ -27,8 +35,8 @@ SINA_HEADERS = {"User-Agent": UA, "Referer": "https://finance.sina.com.cn"}
 OUNCE_GRAMS = 31.1035   # 1 盎司 = 31.1035 克
 
 WECOM = ("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-         "?key=<WECOM_YOUR_KEY>")
-DEEPSEEK_KEY = "<DEEPSEEK_YOUR_KEY>"
+         "?key=" + _secret("wecom_webhook_key"))
+DEEPSEEK_KEY = _secret("deepseek_api_key")
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 PENDING = "/opt/astock/gold_pending.json"

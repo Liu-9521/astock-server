@@ -7,6 +7,14 @@
 
 from __future__ import annotations
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 import sys as _sys
 _sys.path.insert(0, '/opt/astock')
 from db_log import log_trade as _log_trade
@@ -515,7 +523,7 @@ def _equity(d: dict, prices: dict) -> float:
 
 
 WECOM_URL = ("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-             "?key=<WECOM_YOUR_KEY>")
+             "?key=" + _secret("wecom_webhook_key"))
 
 
 def notify_all(md: str, plain: str = "") -> None:

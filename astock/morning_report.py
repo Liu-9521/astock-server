@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 """每日早报：福州天气 + 穿搭建议 + DeepSeek 余额，推送到企业微信"""
 import json
 import ssl
@@ -8,8 +16,8 @@ import urllib.request
 
 CITY = "Fuzhou"
 WECOM = ("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-         "?key=<WECOM_YOUR_KEY>")
-DEEPSEEK_KEY = "<DEEPSEEK_YOUR_KEY>"
+         "?key=" + _secret("wecom_webhook_key"))
+DEEPSEEK_KEY = _secret("deepseek_api_key")
 
 WEATHER_ZH = {
     "Sunny": "晴", "Clear": "晴", "Partly cloudy": "多云", "Cloudy": "多云",

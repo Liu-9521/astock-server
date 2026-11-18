@@ -17,6 +17,8 @@ cp -f "$DSH"/quant/*.py "$REPO/quant/" 2>/dev/null
 cp -f /etc/systemd/system/*.service /etc/systemd/system/*.timer "$REPO/systemd/" 2>/dev/null
 cp -f /etc/sudoers.d/astock-* /etc/sudoers.d/dsh-web "$REPO/systemd/" 2>/dev/null
 crontab -l > "$REPO/crontab.txt" 2>/dev/null
+# 统一密钥读取模块（本身不含密钥，可以入库）
+cp -f ~/.dsh/secrets_lib.py "$REPO/astock/" 2>/dev/null
 
 # ---- 脱敏 1：config.json → config.example.json ----
 python3 - "$REPO" <<'PYEOF'

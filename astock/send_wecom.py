@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.expanduser("~/.dsh"))
+try:
+    from secrets_lib import get as _secret
+except Exception:
+    def _secret(name, default=""):
+        return default
+
 """企业微信群机器人发送脚本
 
 用法:
@@ -11,7 +19,7 @@ import sys
 import urllib.request
 
 WEBHOOK = ("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-           "?key=<WECOM_YOUR_KEY>")
+           "?key=" + _secret("wecom_webhook_key"))
 
 
 def send_text(content: str) -> dict:
