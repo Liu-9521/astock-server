@@ -1,0 +1,7 @@
+[Unit]
+Description=Sync new listening ports into Uptime Kuma
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /opt/astock/sync_kuma.py

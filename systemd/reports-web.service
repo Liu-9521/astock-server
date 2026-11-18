@@ -1,0 +1,13 @@
+[Unit]
+Description=Reports web server (astock)
+After=network.target
+
+[Service]
+User=astock
+WorkingDirectory=/opt/astock/reports
+ExecStart=/usr/bin/python3 -m http.server 8000 --bind 0.0.0.0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

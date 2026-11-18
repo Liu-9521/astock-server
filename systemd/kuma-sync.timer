@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly Uptime Kuma port sync
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

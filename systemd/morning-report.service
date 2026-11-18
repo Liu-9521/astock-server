@@ -1,0 +1,7 @@
+[Unit]
+Description=Morning weather + balance report
+
+[Service]
+Type=oneshot
+User=astock
+ExecStart=/usr/bin/python3 /opt/astock/morning_report.py

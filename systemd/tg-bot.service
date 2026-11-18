@@ -1,0 +1,12 @@
+[Unit]
+Description=Telegram Download Bot
+After=network.target mihomo.service
+
+[Service]
+User=astock
+ExecStart=/opt/astock/venv/bin/python /opt/astock/tg_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

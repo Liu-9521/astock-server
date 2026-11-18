@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSeek Harness Web UI
+After=network.target
+
+[Service]
+User=astock
+WorkingDirectory=/opt/astock
+ExecStart=/usr/bin/dsh web --no-open --host 192.168.0.104 --port 3100
+Restart=always
+RestartSec=10
+Environment=HOME=/home/astock
+Environment=DEEPSEEK_API_KEY=<DEEPSEEK_YOUR_KEY>
+
+[Install]
+WantedBy=multi-user.target

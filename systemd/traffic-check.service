@@ -1,0 +1,7 @@
+[Unit]
+Description=Proxy traffic warning check
+
+[Service]
+Type=oneshot
+User=astock
+ExecStart=/usr/bin/python3 /opt/astock/check_traffic.py

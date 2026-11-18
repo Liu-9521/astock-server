@@ -1,0 +1,13 @@
+[Unit]
+Description=Redirect docker containers HTTPS traffic to mihomo transparent proxy
+After=docker.service network-online.target mihomo.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -t nat -C PREROUTING -s 172.17.0.0/16 -p tcp --dport 443 -j REDIRECT --to-ports 7892 2>/dev/null || iptables -t nat -A PREROUTING -s 172.17.0.0/16 -p tcp --dport 443 -j REDIRECT --to-ports 7892'
+ExecStop=/bin/sh -c 'iptables -t nat -D PREROUTING -s 172.17.0.0/16 -p tcp --dport 443 -j REDIRECT --to-ports 7892 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily proxy traffic report
+
+[Service]
+Type=oneshot
+User=astock
+ExecStart=/usr/bin/python3 /opt/astock/daily_traffic.py

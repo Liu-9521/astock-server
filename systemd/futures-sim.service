@@ -1,0 +1,19 @@
+[Unit]
+Description=Futures Sim (gold/corn) Web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=astock
+Group=astock
+WorkingDirectory=/home/astock/.dsh/dsh_wechat/futures
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/astock/.dsh/dsh_wechat/futures/futures_sim.py
+Restart=always
+RestartSec=5
+MemoryMax=120M
+
+[Install]
+WantedBy=multi-user.target

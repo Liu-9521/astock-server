@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart mihomo when memory is high and no download is active
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mihomo-guard.sh

@@ -1,0 +1,14 @@
+[Unit]
+Description=A-Share Web Panel
+After=network.target
+
+[Service]
+Environment=DEEPSEEK_API_KEY=<DEEPSEEK_YOUR_KEY>
+User=astock
+WorkingDirectory=/opt/astock
+ExecStart=/usr/bin/python3 /opt/astock/webapp.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

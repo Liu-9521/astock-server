@@ -1,0 +1,7 @@
+[Unit]
+Description=Sync astock backups to cloud
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash /opt/astock/sync_backup_cloud.sh

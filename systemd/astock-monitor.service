@@ -1,0 +1,35 @@
+[Unit]
+Description=A-Share Quote Monitor (main.py)
+Documentation=file:///opt/astock/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=astock
+Group=astock
+WorkingDirectory=/opt/astock
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=/usr/bin/python3 /opt/astock/main.py
+Restart=always
+RestartSec=15
+# 允许慢启动，网络恢复后再重试
+TimeoutStartSec=60
+# 温和的资源限制：这台机器只有 1G 内存
+MemoryMax=400M
+CPUQuota=80%
+
+# 日志交给 syslog / journald 统一管理
+StandardOutput=journal
+StandardError=journal
+
+# 基本加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/astock/logs /opt/astock/reports
+
+[Install]
+WantedBy=multi-user.target

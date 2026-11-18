@@ -1,0 +1,23 @@
+30 8 * * * bash /home/astock/.dsh/dsh_wechat/morning_report.sh >/dev/null 2>&1
+5 15 * * 1-5 /home/astock/.dsh/dsh_wechat/.venv_img/bin/python /home/astock/.dsh/dsh_wechat/quant/daily_push.py >/dev/null 2>&1
+25 9 * * 1-5 /home/astock/.dsh/dsh_wechat/.venv_img/bin/python /home/astock/.dsh/dsh_wechat/quant/morning_push.py >/dev/null 2>&1
+*/10 * * * * /usr/bin/python3 /home/astock/.dsh/dsh_wechat/gold_watch.py >/dev/null 2>&1
+0 * * * * /opt/astock/venv/bin/python /opt/astock/media_cleanup.py >> /opt/astock/media_cleanup.log 2>&1
+0 */2 * * * /opt/astock/venv/bin/python /opt/astock/rss_push.py >> /opt/astock/rss_push.log 2>&1
+0 8,20 * * * /opt/astock/venv/bin/python /opt/astock/gold_push.py >> /opt/astock/gold_push.log 2>&1
+30 12 * * * /opt/astock/venv/bin/python /opt/astock/gold_push.py >> /opt/astock/gold_push.log 2>&1
+*/5 * * * * /opt/astock/venv/bin/python /opt/astock/qbit_autotune.py >> /opt/astock/qbit_autotune.log 2>&1
+*/5 * * * * /opt/astock/venv/bin/python /opt/astock/proxy_guard.py >> /opt/astock/proxy_guard.log 2>&1
+*/10 * * * * /opt/astock/venv/bin/python /opt/astock/kuma_guard.py >> /opt/astock/kuma_guard.log 2>&1
+0 */2 * * * /opt/astock/venv/bin/python /opt/astock/media_organize.py >> /opt/astock/media_organize.log 2>&1
+0 7 * * * /opt/astock/venv/bin/python /opt/astock/rss_push.py >> /opt/astock/rss_push.log 2>&1
+30 * * * * /opt/astock/venv/bin/python /opt/astock/qbit_stale.py >> /opt/astock/qbit_stale.log 2>&1
+*/30 8-23 * * * /usr/bin/python3 /home/astock/.dsh/dsh_wechat/gold_trend.py >/dev/null 2>&1
+0 3 * * 0 /usr/bin/python3 /home/astock/.dsh/dsh_wechat/mem_crypt.py rotate >/dev/null 2>&1
+* * * * * /bin/bash /home/astock/.dsh/dsh_wechat/pdd_mens/autostart.sh >/dev/null 2>&1
+* * * * * /bin/bash /home/astock/.dsh/dsh_wechat/pdd_mens/autostart.sh >/dev/null 2>&1
+0 9,12,15,21 * * 1-5 cd /home/astock/.dsh/dsh_wechat && /home/astock/.dsh/dsh_wechat/.venv_img/bin/python gold_spot.py >/dev/null 2>&1
+40 7 * * * /bin/bash /home/astock/checkin/run.sh
+*/10 * * * * /opt/astock/venv/bin/python /opt/astock/gold_push.py --retry-pending >> /opt/astock/gold_push.log 2>&1
+10 3 * * * /bin/bash /home/astock/.dsh/dsh_wechat/backup_extra.sh >> /home/astock/.dsh/dsh_wechat/backup_extra.log 2>&1
+20 3 * * * /bin/bash /home/astock/.dsh/dsh_wechat/git_sync.sh >> /home/astock/.dsh/dsh_wechat/git_sync.log 2>&1

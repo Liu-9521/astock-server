@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotate Telegram bot session
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tg-session-rotate.sh

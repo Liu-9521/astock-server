@@ -1,0 +1,15 @@
+[Unit]
+Description=mihomo proxy
+After=network.target
+
+[Service]
+ExecStart=/opt/mihomo/mihomo -d /opt/mihomo
+Restart=always
+RestartSec=5
+# Go 运行时内存软上限：超过约 512MB 时强制 GC，避免无节制增长到 1GB+
+Environment=GOMEMLIMIT=512MiB
+# GC 触发比例调低（默认 100），更积极回收
+Environment=GOGC=50
+
+[Install]
+WantedBy=multi-user.target

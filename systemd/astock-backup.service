@@ -1,0 +1,7 @@
+[Unit]
+Description=astock server backup
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash /opt/astock/backup.sh
