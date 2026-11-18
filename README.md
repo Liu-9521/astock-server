@@ -32,6 +32,40 @@ astock 服务器的**代码与配置**备份（不含媒体、数据、真实密
 5. `cp systemd/*.service /etc/systemd/system/ && systemctl daemon-reload`
 6. `crontab crontab.txt`
 
+
+## 密钥管理（重要）
+
+所有脚本的密钥都从 **`~/.dsh/secrets.json`** 读取，代码里没有任何硬编码密钥。
+
+格式见 `astock/secrets.example.json`：
+
+```json
+{
+  "wecom_webhook_key": "企业微信机器人 key（webhook 地址里 ?key= 后面那串）",
+  "deepseek_api_key": "DeepSeek 主 Key（sk- 开头）",
+  "deepseek_api_key_2": "DeepSeek 备用 Key",
+  "quant_password": "量化系统 Web 登录密码",
+  "serverchan_sendkey": "Server酱 SendKey（可选）"
+}
+```
+
+部署时：
+
+```bash
+cp astock/secrets.example.json ~/.dsh/secrets.json
+chmod 600 ~/.dsh/secrets.json
+# 然后编辑填真实值
+```
+
+读取工具是 `astock/secrets_lib.py`（部署到 `~/.dsh/secrets_lib.py`），
+各脚本通过 `_secret("键名")` 取值。
+
+**换密钥时只改 secrets.json 一处，不用动代码。**
+
+例外：`systemd/astock-web.service` 和 `systemd/dsh-web.service` 里仍有
+`Environment=DEEPSEEK_API_KEY=...`（systemd 读不了 json），改这两个要
+`systemctl daemon-reload` 并重启服务。
+
 ## 每日自动同步
 
 见 `wechat/git_sync.sh`（每天 3:20 自动 commit + push）。
