@@ -22,3 +22,4 @@
 10 3 * * * /bin/bash /home/astock/.dsh/dsh_wechat/backup_extra.sh >> /home/astock/.dsh/dsh_wechat/backup_extra.log 2>&1
 20 3 * * * /bin/bash /home/astock/.dsh/dsh_wechat/git_sync.sh >> /home/astock/.dsh/dsh_wechat/git_sync.log 2>&1
 30 4 1 * * /bin/bash /opt/astock/sync_monthly.sh >> /opt/astock/sync_monthly.log 2>&1
+*/30 9-15,21-23 * * 1-5 /usr/bin/python3 /home/astock/.dsh/dsh_wechat/futures/kline_collector.py >> /home/astock/.dsh/dsh_wechat/futures/kline_collector.log 2>&1

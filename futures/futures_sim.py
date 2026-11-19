@@ -56,6 +56,12 @@ FUTURES = {
           "margin": 0.10, "night": ("21:00", "23:00")},
     "RB": {"sym": "RB0", "prefix": "RB", "name": "螺纹钢", "mult": 10, "tick": 1,
            "margin": 0.09, "night": ("21:00", "23:00")},
+    # 同一份玉米合约的第二套策略（日线周期），与 30 分钟版并行对照
+    "C_DAY": {"sym": "C0", "prefix": "C", "name": "玉米", "label": "玉米·日线",
+              "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
+    # 同一份豆粕合约的第二套策略（60 分钟周期），与 30 分钟版并行对照
+    "M_60": {"sym": "M0", "prefix": "M", "name": "豆粕", "label": "豆粕·60分",
+             "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
 }
 
 MAIN = {}          # 品种 -> (ts, 主力合约代码)，例如 "C" -> (ts, "C2701")
@@ -81,12 +87,20 @@ def default_data() -> dict:
         "trades": [],
         "logs": [],
         "strategy": {
+            # 玉米·30分钟（原参数）：保留观察，不实际下单
             "C": {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "30",
-                  "enabled": True, "stop_win": 2.0, "stop_loss": 1.2},
+                  "enabled": False, "stop_win": 2.0, "stop_loss": 1.0, "filter": 120},
+            # 玉米·日线：4 年回测前后段都盈利的参数，实际下单
+            "C_DAY": {"name": "ma", "params": {"fast": 3, "slow": 15}, "period": "day",
+                      "enabled": True, "stop_win": 3.0, "stop_loss": 1.5},
             "M": {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "30",
-                  "enabled": True, "stop_win": 2.0, "stop_loss": 1.2},
-            "RB": {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "30",
-                   "enabled": True, "stop_win": 2.0, "stop_loss": 1.2},
+                  "enabled": True, "stop_win": 2.0, "stop_loss": 1.0},
+            # 豆粕·60分钟：8 个月回测 42 笔 +3996 胜率 57.1%，三档过滤均为正
+            "M_60": {"name": "ma", "params": {"fast": 3, "slow": 15}, "period": "60",
+                     "enabled": True, "stop_win": 3.0, "stop_loss": 1.5, "filter": 120},
+            # 螺纹钢：30 分钟三档过滤全负，日线 5/20 是 +2966，改日线
+            "RB": {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "day",
+                   "enabled": True, "stop_win": 2.0, "stop_loss": 1.0},
         },
     }
 
@@ -105,9 +119,9 @@ def load_data() -> dict:
         # 老数据迁移：删掉已下架品种（如 AU），补齐新上架品种
         for k in [k for k in st if k not in FUTURES]:
             st.pop(k, None)
+        _defaults = default_data()["strategy"]
         for k in FUTURES:
-            st.setdefault(k, {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "30",
-                              "enabled": True, "stop_win": 2.0, "stop_loss": 1.2})
+            st.setdefault(k, dict(_defaults.get(k) or _defaults["C"]))
         return d
 
 
@@ -437,17 +451,35 @@ def signal_bias(contract: str) -> str:
 
 
 def quotes_view() -> list:
+    d = load_data()
     out = []
     for k, f in FUTURES.items():
         q = quote_for(k)
-        st = (load_data()["strategy"] or {}).get(k, {})
+        st = (d["strategy"] or {}).get(k, {})
+        # 该策略的历史成交盈亏 + 当前持仓浮盈
+        real = 0.0
+        for t in d.get("trades", []):
+            if t.get("contract") == k:
+                real += float(t.get("pnl") or 0)
+        pos_pnl, pos_qty = 0.0, 0
+        for p in (d.get("positions") or {}).values():
+            if p.get("contract") != k:
+                continue
+            px = q.get("price") or p["open_price"]
+            pos_qty += int(p.get("qty") or 0)
+            pos_pnl += (px - p["open_price"]) * f["mult"] * p["qty"] * (
+                1 if p["side"] == "long" else -1)
         out.append({
-            "contract": k, "name": q.get("name") or main_name(k),
+            "contract": k,
+            "name": f.get("label") or q.get("name") or main_name(k),
             "main": pick_main(k), "price": q.get("price"), "chg": q.get("chg"),
             "mult": f["mult"], "margin": f["margin"], "night": f["night"],
             "strategy": st.get("name", "ma"), "params": st.get("params", {}), "period": st.get("period", "day"),
             "enabled": st.get("enabled", True),
             "stop_win": st.get("stop_win", 1.5), "stop_loss": st.get("stop_loss", 1.5),
+            "filter": st.get("filter", 0),
+            "realized": round(real, 0), "pos_pnl": round(pos_pnl, 0), "pos_qty": pos_qty,
+            "total_pnl": round(real + pos_pnl, 0),
             "last_signal": last_signal(k), "bias": signal_bias(k),
         })
     return out
@@ -507,7 +539,7 @@ def open_position(d: dict, contract: str, side: str, qty: int, reason: str = "")
         "contract": contract, "side": side, "qty": qty,
         "open_price": price, "opened": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    nm = q.get("name") or main_name(contract)
+    nm = f.get("label") or q.get("name") or main_name(contract)
     log(d, f"{'买入开多' if side == 'long' else '卖出开空'} {nm} {qty} 手 @ {price}{reason}")
     try:
         notify_futures("开仓", nm, pick_main(contract),
@@ -527,7 +559,7 @@ def close_position(d: dict, pid: str, reason: str = "") -> dict:
     price = q.get("price") or p["open_price"]
     pnl = (price - p["open_price"]) * f["mult"] * p["qty"] * (1 if p["side"] == "long" else -1)
     d["account"]["realized"] = float(d["account"]["realized"]) + pnl
-    nm = q.get("name") or main_name(p["contract"])
+    nm = f.get("label") or q.get("name") or main_name(p["contract"])
     d["trades"].insert(0, {
         "t": time.strftime("%Y-%m-%d %H:%M:%S"), "contract": p["contract"],
         "name": nm, "side": "多" if p["side"] == "long" else "空",
@@ -559,8 +591,6 @@ def auto_trade(d: dict) -> None:
         return
     strat_map = d.get("strategy") or {}
     for contract, cfg in strat_map.items():
-        if not cfg.get("enabled", True):
-            continue
         if contract not in FUTURES:
             continue
         q = quote_for(contract)
@@ -580,12 +610,24 @@ def auto_trade(d: dict) -> None:
             if sl and pnl_pct <= -sl:
                 close_position(d, pid, f"（止损 {pnl_pct:+.2f}%）")
                 continue
+        # 策略停用后不再开新仓，但已有持仓仍靠上面的止盈止损退出
+        if not cfg.get("enabled", True):
+            continue
         rows = get_kline(contract, cfg.get("period", "day"))
         if not rows:
             continue
         sig = signal(rows, q["price"], cfg.get("name", "ma"), cfg.get("params") or {})
         if not sig:
             continue
+        # 趋势过滤：价格必须在 MA(N) 同侧，否则本次信号作废
+        filt = int(cfg.get("filter") or 0)
+        if filt:
+            cl = [r["c"] for r in rows] + [q["price"]]
+            if len(cl) < filt:
+                continue
+            mt = sum(cl[-filt:]) / filt
+            if (sig == 1 and q["price"] <= mt) or (sig == -1 and q["price"] >= mt):
+                continue
         pid, pos = position_for(d, contract)
         f = FUTURES[contract]
         if sig == 1:  # 多头信号
@@ -687,6 +729,12 @@ button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt
 .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;align-items:end}
 .up{color:var(--up)}.down{color:var(--down)}
 .hint{color:var(--dim);font-size:12px}.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+details.offbox{margin-top:2px;border-top:1px dashed var(--line);padding-top:2px}
+details.offbox>summary{cursor:pointer;color:var(--dim);font-size:12px;padding:9px 0;user-select:none;list-style:none}
+details.offbox>summary::-webkit-details-marker{display:none}
+details.offbox>summary:before{content:'\25B8';display:inline-block;margin-right:6px;transition:transform .15s}
+details.offbox[open]>summary:before{content:'\25BE'}
+details.offbox .row{opacity:.7}
 .logbox{max-height:140px;overflow:auto;font-size:12.5px;color:#a8b6c5}
 .pill{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
 .pill.on{color:var(--down);border-color:rgba(14,203,129,.4)}
@@ -788,18 +836,18 @@ async function load() {
 function renderStrategy(){
   const ro = window.__RO__ === true;
   const paramsTxt = q => Object.entries(q.params||{}).map(function(kv){return kv[0]+'='+kv[1]}).join(',');
-  $('#strategyBox').innerHTML = QUOTES.map(q => ro ? `
+  const card = q => ro ? `
     <div class="row" style="margin-bottom:6px;padding-bottom:6px">
-      <div><label class="hint">${q.name} 现价 ${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span></label></div>
+      <div><label class="hint">${q.name} 现价 ${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span> ｜ 盈亏 <span class="${sign(q.total_pnl)}">${q.total_pnl>0?'+':''}${fmt(q.total_pnl,0)}</span>${q.pos_qty?` <span class="hint">(${q.pos_qty}手 ${q.pos_pnl>0?'+':''}${fmt(q.pos_pnl,0)})</span>`:''}</label></div>
       <div><label class="hint">周期</label><div>${PL[q.period]||'日线'}</div></div>
       <div><label class="hint">策略</label><div>${NAMES[q.strategy]||q.strategy}</div></div>
       <div><label class="hint">参数</label><div>${paramsTxt(q)}</div></div>
-      <div><label class="hint">规则</label><div>止盈${fmt(q.stop_win,1)}% 止损${fmt(q.stop_loss,1)}%</div></div>
+      <div><label class="hint">规则</label><div>止盈${fmt(q.stop_win,1)}% 止损${fmt(q.stop_loss,1)}%${q.filter?` 过滤MA${q.filter}`:''}</div></div>
       <div><label class="hint">自动</label><div>${q.enabled?'启用':'停用'}</div></div>
     </div>
     <div class="hint" style="margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px">最近信号：${q.last_signal||'—'} ｜ 当前：${q.bias||'—'}</div>` : `
     <div class="row" style="margin-bottom:6px">
-      <div><label class="hint">${q.name} 现价 ${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span></label></div>
+      <div><label class="hint">${q.name} 现价 ${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span> ｜ 盈亏 <span class="${sign(q.total_pnl)}">${q.total_pnl>0?'+':''}${fmt(q.total_pnl,0)}</span>${q.pos_qty?` <span class="hint">(${q.pos_qty}手 ${q.pos_pnl>0?'+':''}${fmt(q.pos_pnl,0)})</span>`:''}</label></div>
       <div><label class="hint">策略</label>
         <select data-ct="${q.contract}" data-k="strategy">
           ${Object.entries(NAMES).map(([k,v])=>`<option value="${k}" ${k===q.strategy?'selected':''}>${v}</option>`).join('')}
@@ -817,13 +865,19 @@ function renderStrategy(){
         <input data-ct="${q.contract}" data-k="stop_win" type="number" step="0.1" value="${q.stop_win||0}"></div>
       <div><label class="hint">止损%</label>
         <input data-ct="${q.contract}" data-k="stop_loss" type="number" step="0.1" value="${q.stop_loss||0}"></div>
+      <div><label class="hint">过滤MA</label>
+        <input data-ct="${q.contract}" data-k="filter" type="number" step="10" value="${q.filter||0}"></div>
       <div><label class="hint">自动</label>
         <label class="hint" style="display:flex;gap:6px;align-items:center;padding-top:8px">
           <input type="checkbox" data-ct="${q.contract}" data-k="enabled" ${q.enabled?'checked':''} style="width:auto">启用
         </label></div>
       <div style="display:flex;gap:6px;white-space:nowrap"><button class="ghost" data-save="${q.contract}">保存</button><button class="ghost" data-off="${q.contract}" ${q.enabled?'':'disabled'}>停用</button></div>
     </div>
-    <div class="hint" style="margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px">最近信号：${q.last_signal||'—'} ｜ 当前：${q.bias||'—'}</div>`).join('');
+    <div class="hint" style="margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px">最近信号：${q.last_signal||'—'} ｜ 当前：${q.bias||'—'}</div>`;
+  const onQ = QUOTES.filter(function(q){return q.enabled;});
+  const offQ = QUOTES.filter(function(q){return !q.enabled;});
+  $('#strategyBox').innerHTML = onQ.map(card).join('') +
+    (offQ.length ? '<details class="offbox"><summary>已停用 ' + offQ.length + ' 套策略 · 点开可查看参数或重新启用</summary>' + offQ.map(card).join('') + '</details>' : '');
   if(ro) return;
   document.querySelectorAll('[data-save]').forEach(b => b.onclick = async () => {
     const ct = b.dataset.save;
@@ -840,6 +894,7 @@ function renderStrategy(){
       period: get('period').value,
       stop_win: Number(get('stop_win').value) || 0,
       stop_loss: Number(get('stop_loss').value) || 0,
+      filter: Number(get('filter').value) || 0,
       enabled: get('enabled').checked
     };
     await fetch('/api/strategy', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -855,7 +910,8 @@ function renderStrategy(){
     });
     await fetch('/api/strategy', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({contract: ct, name: get('strategy').value, params, period: get('period').value,
-        stop_win: Number(get('stop_win').value)||0, stop_loss: Number(get('stop_loss').value)||0, enabled: false})});
+        stop_win: Number(get('stop_win').value)||0, stop_loss: Number(get('stop_loss').value)||0,
+        filter: Number(get('filter').value)||0, enabled: false})});
     load();
   });
 }
@@ -1153,7 +1209,8 @@ class Handler(BaseHTTPRequestHandler):
                                  "period": str(body.get("period") or "day"),
                                  "enabled": bool(body.get("enabled", True)),
                                  "stop_win": float(body.get("stop_win") or 0),
-                                 "stop_loss": float(body.get("stop_loss") or 0)}
+                                 "stop_loss": float(body.get("stop_loss") or 0),
+                                 "filter": int(body.get("filter") or 0)}
             log(d, f"{FUTURES[ct]['name']} 策略改为 {STRATEGIES[name]['label']} {params}")
             save_data(d)
             return self._json({"ok": True})
