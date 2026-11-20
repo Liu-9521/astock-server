@@ -1,0 +1,15 @@
+[Unit]
+Description=Gold auto strategy (spot gold, long only, MA5/20 + MA10/30)
+After=network-online.target
+
+[Service]
+Type=simple
+User=astock
+WorkingDirectory=/home/astock/.dsh/dsh_wechat/futures
+ExecStart=/usr/bin/python3 /home/astock/.dsh/dsh_wechat/futures/gold_algo.py
+Restart=always
+RestartSec=10
+MemoryMax=120M
+
+[Install]
+WantedBy=multi-user.target

@@ -56,6 +56,9 @@ FUTURES = {
           "margin": 0.10, "night": ("21:00", "23:00")},
     "RB": {"sym": "RB0", "prefix": "RB", "name": "螺纹钢", "mult": 10, "tick": 1,
            "margin": 0.09, "night": ("21:00", "23:00")},
+    # 玉米·60分钟（回测最优：3/15 + MA60 过滤 + 最少持10根 + 1% 止损 + 0.6% 移动止损）
+    "C_60": {"sym": "C0", "prefix": "C", "name": "玉米", "label": "玉米·60分",
+             "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
     # 同一份玉米合约的第二套策略（日线周期），与 30 分钟版并行对照
     "C_DAY": {"sym": "C0", "prefix": "C", "name": "玉米", "label": "玉米·日线",
               "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
@@ -95,9 +98,14 @@ def default_data() -> dict:
                       "enabled": True, "stop_win": 3.0, "stop_loss": 1.5},
             "M": {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "30",
                   "enabled": True, "stop_win": 2.0, "stop_loss": 1.0},
+            # 玉米·60分钟：8 个月回测 30 笔 +2040 胜率 60%，带移动止损
+            "C_60": {"name": "ma", "params": {"fast": 3, "slow": 15}, "period": "60",
+                     "enabled": True, "stop_win": 0.0, "stop_loss": 1.0, "filter": 60,
+                     "min_hold": 10, "trail": 0.6, "breakeven": 1.0},
             # 豆粕·60分钟：8 个月回测 42 笔 +3996 胜率 57.1%，三档过滤均为正
             "M_60": {"name": "ma", "params": {"fast": 3, "slow": 15}, "period": "60",
-                     "enabled": True, "stop_win": 3.0, "stop_loss": 1.5, "filter": 120},
+                     "enabled": True, "stop_win": 3.0, "stop_loss": 1.5, "filter": 120,
+                     "trail": 0.6, "breakeven": 1.0},
             # 螺纹钢：30 分钟三档过滤全负，日线 5/20 是 +2966，改日线
             "RB": {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "day",
                    "enabled": True, "stop_win": 2.0, "stop_loss": 1.0},
@@ -379,8 +387,12 @@ def account_view(d: dict) -> dict:
         pnl = (price - p["open_price"]) * f["mult"] * p["qty"] * (1 if p["side"] == "long" else -1)
         margin += m
         floating += pnl
+        _st = (d.get("strategy") or {}).get(p["contract"], {})
         pos_list.append({
             "id": pid, "contract": p["contract"],
+            "label": f.get("label") or f["name"],
+            "main": pick_main(p["contract"]),
+            "period": _st.get("period", "day"),
             "name": q.get("name") or main_name(p["contract"]),
             "side": "多" if p["side"] == "long" else "空",
             "qty": p["qty"], "open_price": p["open_price"], "price": price,
@@ -478,6 +490,8 @@ def quotes_view() -> list:
             "enabled": st.get("enabled", True),
             "stop_win": st.get("stop_win", 1.5), "stop_loss": st.get("stop_loss", 1.5),
             "filter": st.get("filter", 0),
+            "trail": st.get("trail", 0), "breakeven": st.get("breakeven", 1.0),
+            "min_hold": st.get("min_hold", 0),
             "realized": round(real, 0), "pos_pnl": round(pos_pnl, 0), "pos_qty": pos_qty,
             "total_pnl": round(real + pos_pnl, 0),
             "last_signal": last_signal(k), "bias": signal_bias(k),
@@ -604,14 +618,32 @@ def auto_trade(d: dict) -> None:
                 pnl_pct = -pnl_pct
             sw = float(cfg.get("stop_win") or 0)
             sl = float(cfg.get("stop_loss") or 0)
+            trail = float(cfg.get("trail") or 0)
+            breakeven = float(cfg.get("breakeven") or 1.0)
+            # 记录持仓期间出现过的最大浮盈（用于移动止损）
+            best = float(pos.get("best") or 0.0)
+            if pnl_pct > best:
+                best = pnl_pct
+                pos["best"] = round(best, 4)
+            # 当前生效的止损线：固定止损，或浮盈达标后上移（保本 → 跟踪）
+            stop_line = sl
+            if trail and best >= breakeven:
+                stop_line = max(sl, max(0.0, best - trail))
             if sw and pnl_pct >= sw:
                 close_position(d, pid, f"（止盈 {pnl_pct:+.2f}%）")
                 continue
-            if sl and pnl_pct <= -sl:
-                close_position(d, pid, f"（止损 {pnl_pct:+.2f}%）")
+            if stop_line and pnl_pct <= -stop_line:
+                if trail and best >= breakeven and stop_line > sl:
+                    close_position(
+                        d, pid,
+                        f"（移动止损 浮盈曾达 {best:+.2f}%，现 {pnl_pct:+.2f}%）")
+                else:
+                    close_position(d, pid, f"（止损 {pnl_pct:+.2f}%）")
                 continue
-        # 策略停用后不再开新仓，但已有持仓仍靠上面的止盈止损退出
+        # 策略停用：立即平掉该策略的存量持仓，不留孤儿仓位
         if not cfg.get("enabled", True):
+            if pos:
+                close_position(d, pid, "（策略停用自动平仓）")
             continue
         rows = get_kline(contract, cfg.get("period", "day"))
         if not rows:
@@ -630,18 +662,30 @@ def auto_trade(d: dict) -> None:
                 continue
         pid, pos = position_for(d, contract)
         f = FUTURES[contract]
+        # 最少持仓：不足 N 根 K 线时忽略反向信号（不反手、也不新开）
+        mh = int(cfg.get("min_hold") or 0)
+        if pos and mh:
+            bars_at = pos.get("bars_at_open")
+            if bars_at is not None and len(rows) - int(bars_at) < mh:
+                continue
         if sig == 1:  # 多头信号
             if pos and pos["side"] == "short":
                 close_position(d, pid, "（策略反手）")
                 pid, pos = position_for(d, contract)
             if not pos:
-                open_position(d, contract, "long", 1, "（策略自动）")
+                res = open_position(d, contract, "long", 1, "（策略自动）")
+                if isinstance(res, dict) and res.get("id"):
+                    d["positions"][res["id"]]["bars_at_open"] = len(rows)
+                    save_data(d)
         elif sig == -1:  # 空头信号
             if pos and pos["side"] == "long":
                 close_position(d, pid, "（策略反手）")
                 pid, pos = position_for(d, contract)
             if not pos:
-                open_position(d, contract, "short", 1, "（策略自动）")
+                res = open_position(d, contract, "short", 1, "（策略自动）")
+                if isinstance(res, dict) and res.get("id"):
+                    d["positions"][res["id"]]["bars_at_open"] = len(rows)
+                    save_data(d)
 
 
 # ---------------- 轮询 ----------------
@@ -727,6 +771,25 @@ input,select{background:#0d1319;border:1px solid var(--line);color:var(--txt);bo
 button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer}
 button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
 .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;align-items:end}
+.cardhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.cardhead b{font-size:15px;font-weight:600;color:#fff}
+.cardhead>span{font-size:13px}
+.grid4{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px;align-items:start;margin-bottom:10px}
+.grid4>div>label{display:block;font-size:11px;color:var(--dim);margin-bottom:4px;line-height:1.3;white-space:nowrap}
+.grid4>div>input,.grid4>div>select{width:100%;box-sizing:border-box}
+.grid4>div>div{font-size:13px;padding-top:7px}
+.grid4 .btns{display:flex;align-items:flex-end;gap:6px;white-space:nowrap}
+.sigline{font-size:12px;color:var(--dim);padding-top:8px;border-top:1px solid var(--line)}
+details.offbox .grid4{opacity:.7}
+.frow{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:8px}
+.fgroup{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:1px 7px;white-space:nowrap;flex:none}
+.fi{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;flex:none}
+.fi>i{font-style:normal;font-size:12px;color:var(--dim)}
+.fi>b{font-weight:500;font-size:13px}
+.fi>input,.fi>select{width:auto;min-width:72px;max-width:130px;padding:5px 7px;font-size:13px}
+.fi>input[data-k="params"]{min-width:150px;max-width:190px}
+.frow .fbtn{margin-left:auto;display:flex;gap:6px;flex:none}
+details.offbox .frow{opacity:.75}
 .up{color:var(--up)}.down{color:var(--down)}
 .hint{color:var(--dim);font-size:12px}.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 details.offbox{margin-top:2px;border-top:1px dashed var(--line);padding-top:2px}
@@ -774,7 +837,7 @@ canvas{width:100%;height:300px;display:block}
       <button class="ghost" id="k30" style="padding:3px 10px;font-size:12px">30分</button>
       <button class="ghost" id="k60" style="padding:3px 10px;font-size:12px">60分</button>
     </span>
-    <span class="hint">▲ 买入　▼ 卖出　黄=MA5　紫=MA20</span>
+    <span class="hint" id="kLegend">▲ 买入　▼ 卖出</span>
   </div>
   <canvas id="kline"></canvas>
 </div>
@@ -825,7 +888,12 @@ async function load() {
     renderTrades(d.trades || []);
     $('#logBox').innerHTML = (d.logs||[]).slice(0,50).map(l => `<div><span class="hint">${l.t}</span> ${l.msg}</div>`).join('') || '<div class="hint">暂无</div>';
     if(!$('#kContract').options.length){
-      $('#kContract').innerHTML = QUOTES.map(q => `<option value="${q.contract}">${q.name}${/\\d{4}/.test(q.name||'') ? '' : '（'+(q.main||'')+'）'}</option>`).join('');
+      $('#kContract').innerHTML = QUOTES.map(q => {
+        const pp = (q.params||{}).fast ? ` MA${q.params.fast}/${q.params.slow}` : '';
+        return `<option value="${q.contract}">${q.name}${/\\d{4}/.test(q.name||'') ? '' : '（'+(q.main||'')+'）'}${pp} · ${PL[q.period]||q.period}${q.enabled?'':'（停）'}</option>`;
+      }).join('');
+      const _kc = localStorage.getItem('fut_kc');
+      if(_kc && QUOTES.some(x => x.contract === _kc)) $('#kContract').value = _kc;
       loadKline();
     }
     const curQ = QUOTES.find(x => x.contract === ($('#kContract').value || (QUOTES[0]||{}).contract));
@@ -836,44 +904,73 @@ async function load() {
 function renderStrategy(){
   const ro = window.__RO__ === true;
   const paramsTxt = q => Object.entries(q.params||{}).map(function(kv){return kv[0]+'='+kv[1]}).join(',');
+  const head = q => `<div class="cardhead">
+        <b>${q.name}</b>
+        <span>${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span></span>
+        <span class="hint">盈亏 <span class="${sign(q.total_pnl)}">${q.total_pnl>0?'+':''}${fmt(q.total_pnl,0)}</span>${q.pos_qty?` ｜ 持仓 ${q.pos_qty}手 <span class="${sign(q.pos_pnl)}">${q.pos_pnl>0?'+':''}${fmt(q.pos_pnl,0)}</span>`:''}</span>
+        <span class="pill ${q.enabled?'on':''}">${q.enabled?'启用':'停用'}</span>
+      </div>`;
+  const tail = q => `<div class="sigline">最近信号：${q.last_signal||'—'} ｜ 当前：${q.bias||'—'}</div>`;
   const card = q => ro ? `
-    <div class="row" style="margin-bottom:6px;padding-bottom:6px">
-      <div><label class="hint">${q.name} 现价 ${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span> ｜ 盈亏 <span class="${sign(q.total_pnl)}">${q.total_pnl>0?'+':''}${fmt(q.total_pnl,0)}</span>${q.pos_qty?` <span class="hint">(${q.pos_qty}手 ${q.pos_pnl>0?'+':''}${fmt(q.pos_pnl,0)})</span>`:''}</label></div>
-      <div><label class="hint">周期</label><div>${PL[q.period]||'日线'}</div></div>
-      <div><label class="hint">策略</label><div>${NAMES[q.strategy]||q.strategy}</div></div>
-      <div><label class="hint">参数</label><div>${paramsTxt(q)}</div></div>
-      <div><label class="hint">规则</label><div>止盈${fmt(q.stop_win,1)}% 止损${fmt(q.stop_loss,1)}%${q.filter?` 过滤MA${q.filter}`:''}</div></div>
-      <div><label class="hint">自动</label><div>${q.enabled?'启用':'停用'}</div></div>
-    </div>
-    <div class="hint" style="margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px">最近信号：${q.last_signal||'—'} ｜ 当前：${q.bias||'—'}</div>` : `
-    <div class="row" style="margin-bottom:6px">
-      <div><label class="hint">${q.name} 现价 ${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span> ｜ 盈亏 <span class="${sign(q.total_pnl)}">${q.total_pnl>0?'+':''}${fmt(q.total_pnl,0)}</span>${q.pos_qty?` <span class="hint">(${q.pos_qty}手 ${q.pos_pnl>0?'+':''}${fmt(q.pos_pnl,0)})</span>`:''}</label></div>
-      <div><label class="hint">策略</label>
-        <select data-ct="${q.contract}" data-k="strategy">
-          ${Object.entries(NAMES).map(([k,v])=>`<option value="${k}" ${k===q.strategy?'selected':''}>${v}</option>`).join('')}
-        </select></div>
-      <div><label class="hint">周期</label>
-        <select data-ct="${q.contract}" data-k="period">
-          <option value="day" ${q.period==='day'?'selected':''}>日线</option>
-          <option value="60" ${q.period==='60'?'selected':''}>60分钟</option>
-          <option value="30" ${q.period==='30'?'selected':''}>30分钟</option>
-          <option value="15" ${q.period==='15'?'selected':''}>15分钟</option>
-        </select></div>
-      <div><label class="hint">参数</label>
-        <input data-ct="${q.contract}" data-k="params" value="${paramsTxt(q)}"></div>
-      <div><label class="hint">止盈%</label>
-        <input data-ct="${q.contract}" data-k="stop_win" type="number" step="0.1" value="${q.stop_win||0}"></div>
-      <div><label class="hint">止损%</label>
-        <input data-ct="${q.contract}" data-k="stop_loss" type="number" step="0.1" value="${q.stop_loss||0}"></div>
-      <div><label class="hint">过滤MA</label>
-        <input data-ct="${q.contract}" data-k="filter" type="number" step="10" value="${q.filter||0}"></div>
-      <div><label class="hint">自动</label>
-        <label class="hint" style="display:flex;gap:6px;align-items:center;padding-top:8px">
-          <input type="checkbox" data-ct="${q.contract}" data-k="enabled" ${q.enabled?'checked':''} style="width:auto">启用
-        </label></div>
-      <div style="display:flex;gap:6px;white-space:nowrap"><button class="ghost" data-save="${q.contract}">保存</button><button class="ghost" data-off="${q.contract}" ${q.enabled?'':'disabled'}>停用</button></div>
-    </div>
-    <div class="hint" style="margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px">最近信号：${q.last_signal||'—'} ｜ 当前：${q.bias||'—'}</div>`;
+    <div style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--line)">
+      ${head(q)}
+      <div class="frow">
+        <span class="fgroup">开仓</span>
+        <span class="fi"><i>策略</i><b>${NAMES[q.strategy]||q.strategy}</b></span>
+        <span class="fi"><i>周期</i><b>${PL[q.period]||'日线'}</b></span>
+        <span class="fi"><i>参数</i><b>${paramsTxt(q)}</b></span>
+        <span class="fi"><i>过滤MA</i><b>${q.filter||'—'}</b></span>
+      </div>
+      <div class="frow">
+        <span class="fgroup">风控</span>
+        <span class="fi"><i>止盈</i><b>${q.stop_win?fmt(q.stop_win,1)+'%':'—'}</b></span>
+        <span class="fi"><i>止损</i><b>${q.stop_loss?fmt(q.stop_loss,1)+'%':'—'}</b></span>
+        <span class="fi"><i>移动止损</i><b>${q.trail?fmt(q.trail,1)+'%':'—'}</b></span>
+        <span class="fi"><i>保本</i><b>${q.trail?fmt(q.breakeven,1)+'%':'—'}</b></span>
+        <span class="fi"><i>最少持</i><b>${q.min_hold?q.min_hold+'根':'—'}</b></span>
+      </div>
+      ${tail(q)}
+    </div>` : `
+    <div style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--line)">
+      ${head(q)}
+      <div class="frow">
+        <span class="fgroup">开仓</span>
+        <label class="fi"><i>策略</i>
+          <select data-ct="${q.contract}" data-k="strategy">
+            ${Object.entries(NAMES).map(([k,v])=>`<option value="${k}" ${k===q.strategy?'selected':''}>${v}</option>`).join('')}
+          </select></label>
+        <label class="fi"><i>周期</i>
+          <select data-ct="${q.contract}" data-k="period">
+            <option value="day" ${q.period==='day'?'selected':''}>日线</option>
+            <option value="60" ${q.period==='60'?'selected':''}>60分钟</option>
+            <option value="30" ${q.period==='30'?'selected':''}>30分钟</option>
+            <option value="15" ${q.period==='15'?'selected':''}>15分钟</option>
+          </select></label>
+        <label class="fi"><i>参数</i>
+          <input data-ct="${q.contract}" data-k="params" value="${paramsTxt(q)}"></label>
+        <label class="fi"><i>过滤MA</i>
+          <input data-ct="${q.contract}" data-k="filter" type="number" step="10" value="${q.filter||0}"></label>
+      </div>
+      <div class="frow">
+        <span class="fgroup">风控</span>
+        <label class="fi"><i>止盈%</i>
+          <input data-ct="${q.contract}" data-k="stop_win" type="number" step="0.1" value="${q.stop_win||0}"></label>
+        <label class="fi"><i>止损%</i>
+          <input data-ct="${q.contract}" data-k="stop_loss" type="number" step="0.1" value="${q.stop_loss||0}"></label>
+        <label class="fi"><i>移动止损%</i>
+          <input data-ct="${q.contract}" data-k="trail" type="number" step="0.1" value="${q.trail||0}"></label>
+        <label class="fi"><i>保本%</i>
+          <input data-ct="${q.contract}" data-k="breakeven" type="number" step="0.1" value="${q.breakeven||0}"></label>
+        <label class="fi"><i>最少持</i>
+          <input data-ct="${q.contract}" data-k="min_hold" type="number" step="1" value="${q.min_hold||0}" style="min-width:56px;max-width:64px"></label>
+      </div>
+      <div class="frow">
+        <span class="fgroup">状态</span>
+        <label class="fi"><input type="checkbox" data-ct="${q.contract}" data-k="enabled" ${q.enabled?'checked':''} style="width:auto;min-width:0"><i>启用</i></label>
+        <span class="fbtn"><button class="ghost" data-save="${q.contract}">保存</button><button class="ghost" data-off="${q.contract}" ${q.enabled?'':'disabled'}>停用</button></span>
+      </div>
+      ${tail(q)}
+    </div>`;
   const onQ = QUOTES.filter(function(q){return q.enabled;});
   const offQ = QUOTES.filter(function(q){return !q.enabled;});
   $('#strategyBox').innerHTML = onQ.map(card).join('') +
@@ -895,6 +992,9 @@ function renderStrategy(){
       stop_win: Number(get('stop_win').value) || 0,
       stop_loss: Number(get('stop_loss').value) || 0,
       filter: Number(get('filter').value) || 0,
+      trail: Number(get('trail').value) || 0,
+      breakeven: Number(get('breakeven').value) || 0,
+      min_hold: Number(get('min_hold').value) || 0,
       enabled: get('enabled').checked
     };
     await fetch('/api/strategy', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -911,16 +1011,19 @@ function renderStrategy(){
     await fetch('/api/strategy', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({contract: ct, name: get('strategy').value, params, period: get('period').value,
         stop_win: Number(get('stop_win').value)||0, stop_loss: Number(get('stop_loss').value)||0,
-        filter: Number(get('filter').value)||0, enabled: false})});
+        filter: Number(get('filter').value)||0,
+        trail: Number(get('trail').value)||0, breakeven: Number(get('breakeven').value)||0,
+        min_hold: Number(get('min_hold').value)||0,
+        enabled: false})});
     load();
   });
 }
 
 function renderPos(list) {
   if (!list.length) { $('#posBox').innerHTML = '<div class="hint" style="padding:10px">无持仓</div>'; return; }
-  $('#posBox').innerHTML = `<table><thead><tr><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>现价</th><th>浮动盈亏</th><th>保证金</th><th>操作</th></tr></thead><tbody>${
+  $('#posBox').innerHTML = `<table><thead><tr><th>策略</th><th>方向</th><th>手数</th><th>开仓价</th><th>现价</th><th>浮动盈亏</th><th>保证金</th><th>操作</th></tr></thead><tbody>${
     list.map(p => `<tr>
-      <td>${p.name}</td><td class="${p.side==='多'?'up':'down'}">${p.side}</td><td>${p.qty}</td>
+      <td><b>${p.label||p.name}</b><span class="hint"> · ${p.main||''}@${fmt(p.open_price,2)}</span></td><td class="${p.side==='多'?'up':'down'}">${p.side}</td><td>${p.qty}</td>
       <td>${fmt(p.open_price,2)}</td><td>${fmt(p.price,2)}</td>
       <td class="${sign(p.pnl)}">${fmt(p.pnl,0)}</td><td>${fmt(p.margin,0)}</td>
       <td><button class="ghost" data-close="${p.id}">平仓</button></td></tr>`).join('')
@@ -935,10 +1038,10 @@ function renderPos(list) {
 function renderTrades(list) {
   if (!list.length) { $('#tradeBox').innerHTML = '<div class="hint" style="padding:10px">还没有成交</div>'; return; }
   $('#tradeBox').innerHTML = `<table><thead><tr><th>时间</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>平仓价</th><th>盈亏</th></tr></thead><tbody>${
-    list.slice(0,30).map(t => `<tr><td class="hint">${t.t}</td><td>${t.name}</td>
+    list.slice(0,30).map(t => { const _q = (window.QUOTES||[]).find(x=>x.contract===t.contract)||{}; return `<tr><td class="hint">${t.t}</td><td>${_q.name||t.name}</td>
       <td class="${t.side==='多'?'up':'down'}">${t.side}</td><td>${t.qty}</td>
       <td>${fmt(t.open_price,2)}</td><td>${fmt(t.close_price,2)}</td>
-      <td class="${sign(t.pnl)}">${fmt(t.pnl,0)}</td></tr>`).join('')
+      <td class="${sign(t.pnl)}">${fmt(t.pnl,0)}</td></tr>`}).join('')
   }</tbody></table>`;
 }
 
@@ -999,8 +1102,11 @@ function drawKline(){
     const y1 = Y(Math.max(r.o,r.c)), y2 = Y(Math.min(r.o,r.c));
     ctx.fillRect(x-bw/2, y1, bw, Math.max(1, y2-y1));
   });
-  const ma = (n, color) => {
-    ctx.strokeStyle=color; ctx.lineWidth=1.2; ctx.beginPath();
+  const ma = (n, color, dash) => {
+    ctx.save();
+    ctx.strokeStyle=color; ctx.lineWidth=dash?1:1.2;
+    if(dash) ctx.setLineDash([5,4]);
+    ctx.beginPath();
     let started=false;
     rows.forEach((r,i)=>{
       if(i+1<n) return;
@@ -1009,8 +1115,15 @@ function drawKline(){
       if(!started){ ctx.moveTo(X(i),Y(v)); started=true; } else ctx.lineTo(X(i),Y(v));
     });
     ctx.stroke();
+    ctx.restore();
   };
-  ma(5,'#e3b341'); ma(20,'#a371f7');
+  const kq = QUOTES.find(x => x.contract === ($('#kContract').value || '')) || {};
+  const pf = (kq.params || {}).fast || 5, ps = (kq.params || {}).slow || 20;
+  const pfl = kq.filter || 0;
+  ma(pf,'#e3b341'); ma(ps,'#a371f7');
+  if(pfl) ma(pfl,'#6b7280',true);
+  const _lg = $('#kLegend');
+  if(_lg) _lg.textContent = `▲ 买入　▼ 卖出　黄=MA${pf}　紫=MA${ps}` + (pfl ? `　灰虚线=MA${pfl}` : '');
   // 当前价浮标（右侧最新价线）
   const lastBar = rows[rows.length-1];
   const cur = lastBar.c;
@@ -1047,7 +1160,7 @@ function drawKline(){
   }
 }
 
-$('#kContract').onchange = loadKline;
+$('#kContract').onchange = () => { localStorage.setItem('fut_kc', $('#kContract').value); loadKline(); };
 $('#kDay').onclick = () => { KP = 'day'; localStorage.setItem('fut_kp','day'); loadKline(); };
 $('#k15').onclick = () => { KP = '15'; localStorage.setItem('fut_kp','15'); loadKline(); };
 $('#k30').onclick = () => { KP = '30'; localStorage.setItem('fut_kp','30'); loadKline(); };
@@ -1210,7 +1323,10 @@ class Handler(BaseHTTPRequestHandler):
                                  "enabled": bool(body.get("enabled", True)),
                                  "stop_win": float(body.get("stop_win") or 0),
                                  "stop_loss": float(body.get("stop_loss") or 0),
-                                 "filter": int(body.get("filter") or 0)}
+                                 "filter": int(body.get("filter") or 0),
+                                 "trail": float(body.get("trail") or 0),
+                                 "breakeven": float(body.get("breakeven") or 1.0),
+                                 "min_hold": int(body.get("min_hold") or 0)}
             log(d, f"{FUTURES[ct]['name']} 策略改为 {STRATEGIES[name]['label']} {params}")
             save_data(d)
             return self._json({"ok": True})

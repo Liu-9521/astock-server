@@ -38,7 +38,7 @@ STAMP = 0.0005         # 印花税（卖出，仅股票）
 INIT_CASH = 35000.0
 POS_PCT = 0.10         # 单只最多占总资产比例（POS_AMOUNT>0 时不生效）
 MAX_POS = 10          # 最多同时持仓数量（超过不再开新仓）
-POS_AMOUNT = 2000.0    # 单只固定买入金额（元），设 0 则按比例
+POS_AMOUNT = 4000.0    # 单只固定买入金额（元），设 0 则按比例
 HIST_DAYS = 160
 
 _lock = threading.Lock()
@@ -242,6 +242,7 @@ def hist_60min(code: str, n: int = 240) -> list:
 _mkt_cache = {"ts": 0.0, "state": None}
 MKT_TTL = 300
 MARKET_PAUSE_PCT = -2.0   # 上证当日跌幅达到该值才暂停开仓
+MARKET_PANIC_CLEAR = False  # 大盘暴跌全清仓开关：False=关闭（靠个股止损保护）
 
 
 def index_state() -> dict:
@@ -648,7 +649,7 @@ def tick(force: bool = False) -> dict:
         if can_trade:
             # 大盘暴跌保护：上证跌超 2%，全部清仓离场
             mchg = (mkt or {}).get("chg")
-            if mchg is not None and mchg <= -2.0 and d["positions"]:
+            if MARKET_PANIC_CLEAR and mchg is not None and mchg <= -2.0 and d["positions"]:
                 for code in list(d["positions"].keys()):
                     st = next((x for x in d["stocks"] if x["code"] == code), None)
                     if not st:
@@ -753,7 +754,7 @@ def tick(force: bool = False) -> dict:
                         d["positions"][code] = {
                             "name": info["name"] or st.get("name") or code,
                             "qty": qty, "cost": round(px, 3), "last_price": px,
-                            "tp": float(st.get("tp") or 4.0), "sl": float(st.get("sl") or 3.0),
+                            "tp": float(st.get("tp") or 0), "sl": float(st.get("sl") or 3.0),
                             "buy_date": datetime.now().strftime("%Y-%m-%d"),
                             "strategy": st["strategy"],
                         }

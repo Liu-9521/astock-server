@@ -64,4 +64,17 @@ mkdir -p "$MEM_SNAP"
 find "$MEM_SNAP" -maxdepth 1 -name 'MEMORY-*.md' -mtime +60 -delete 2>/dev/null || true
 find "$MEM_SNAP" -maxdepth 1 -name 'AGENTS-*.md' -mtime +60 -delete 2>/dev/null || true
 
+# 归档文件（MEMORY-ARCHIVE.md）：内容变化时才复制，保留 180 天
+ARCH_SRC=/home/astock/.dsh/MEMORY-ARCHIVE.md
+if [ -f "$ARCH_SRC" ]; then
+  NEWH=$(md5sum "$ARCH_SRC" | cut -d' ' -f1)
+  LASTF=$(ls -t "$MEM_SNAP"/MEMORY-ARCHIVE-*.md 2>/dev/null | head -1)
+  if [ -z "$LASTF" ] || [ "$NEWH" != "$(md5sum "$LASTF" | cut -d' ' -f1)" ]; then
+    cp -f "$ARCH_SRC" "$MEM_SNAP/MEMORY-ARCHIVE-$(date +%Y%m%d).md"
+    echo "archived: MEMORY-ARCHIVE-$(date +%Y%m%d).md"
+  fi
+fi
+find "$MEM_SNAP" -maxdepth 1 -name 'MEMORY-ARCHIVE-*.md' -mtime +180 -delete 2>/dev/null || true
+
+
 echo "backup done: $OUT ($(du -h "$OUT" 2>/dev/null | cut -f1))"

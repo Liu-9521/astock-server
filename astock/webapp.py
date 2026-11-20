@@ -400,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/media":
                 self._send((WEB_DIR / "media.html").read_bytes(), "text/html; charset=utf-8")
             elif u.path in ("/gold", "/gold2"):
-                fp = WEB_DIR / "gold.html"
+                fp = WEB_DIR / ("gold_sim.html" if u.path == "/gold" else "gold.html")
                 if fp.exists():
                     # 服务端把当前行情直接塞进页面，前端 fetch 挂了也能看到数
                     try:
@@ -433,6 +433,19 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/gold":
                 try:
                     self._json(self.api_gold())
+                except Exception as e:
+                    self._json({"error": str(e)}, 500)
+            elif u.path == "/gold-sim":
+                fp = WEB_DIR / "gold_sim.html"
+                if fp.exists():
+                    self._send(fp.read_bytes(), "text/html; charset=utf-8")
+                else:
+                    self._json({"error": "gold_sim.html not built"}, 404)
+            elif u.path == "/api/gold/algo":
+                self._json(self.api_gold_algo())
+            elif u.path == "/api/gold/sim":
+                try:
+                    self._json(self.api_gold_sim())
                 except Exception as e:
                     self._json({"error": str(e)}, 500)
             elif u.path == "/api/gold/kline":
@@ -720,6 +733,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_dsh_toggle(body))
             elif u.path == "/api/qbit/toggle":
                 self._json(self.api_qbit_toggle(body))
+            elif u.path == "/api/gold/sim/open":
+                self._json(self.api_gold_sim_open(body))
+            elif u.path == "/api/gold/sim/close":
+                self._json(self.api_gold_sim_close(body))
+            elif u.path == "/api/gold/sim/reset":
+                self._json(self.api_gold_sim_reset(body))
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as exc:  # noqa: BLE001
@@ -1411,6 +1430,190 @@ class Handler(BaseHTTPRequestHandler):
                 self._gold_cache["data"] = dict(out)
                 self._gold_cache["ts"] = _time.time()
         return out
+
+    # ================= 金银模拟盘 =================
+    GOLD_SIM = Path("/opt/astock/gold_sim.json")
+
+    def _gs_load(self):
+        try:
+            d = json.loads(self.GOLD_SIM.read_text(encoding="utf-8"))
+            d.setdefault("positions", {})
+            d.setdefault("trades", [])
+            d.setdefault("initial", 100000.0)
+            d.setdefault("cash", d["initial"])
+            return d
+        except Exception:
+            d = {"initial": 100000.0, "cash": 100000.0, "positions": {}, "trades": []}
+            self._gs_save(d)
+            return d
+
+    def _gs_save(self, d):
+        try:
+            self.GOLD_SIM.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _gs_meta(metal):
+        return ("gold", "黄金") if metal == "gold" else ("silver", "白银")
+
+    def _gs_prices(self):
+        g = self.api_gold() or {}
+        au = float((g.get("au0") or {}).get("price") or 0)
+        ag = float((g.get("ag0") or {}).get("price") or 0) / 1000.0
+        gchg = float((g.get("au0") or {}).get("chg") or 0)
+        schg = float((g.get("ag0") or {}).get("chg") or 0)
+        return au, ag, gchg, schg
+
+    def api_gold_algo(self):
+        """现货金自动策略状态（读 gold_algo.json，由 gold_algo.py 写入）。"""
+        fp = Path("/home/astock/.dsh/dsh_wechat/futures/gold_algo.json")
+        try:
+            d = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {"error": "策略引擎尚未生成状态：%s" % e,
+                    "initial": 50000.0, "price": 0, "updated": ""}
+        price = float(d.get("price") or 0)
+        init = float(d.get("initial") or 50000.0)
+        for k in ("day", "m60"):
+            st = d.get(k) or {}
+            cash = float(st.get("cash") or 0)
+            qty = float(st.get("qty") or 0)
+            st["equity"] = round(cash + qty * price, 2)
+            st["pnl"] = round(st["equity"] - init, 2)
+            st["pct"] = round(st["pnl"] / init * 100, 2) if init else 0
+            st["value"] = round(qty * price, 2)
+            d[k] = st
+        return d
+
+    def api_gold_sim(self):
+        d = self._gs_load()
+        au, ag, gchg, schg = self._gs_prices()
+        pos = d.get("positions") or {}
+        rows = []
+        hold = 0.0
+        float_pnl = 0.0
+        for metal in ("gold", "silver"):
+            p = pos.get(metal)
+            if not p:
+                continue
+            m, label = self._gs_meta(metal)
+            cur = au if metal == "gold" else ag
+            qty = float(p["qty"])
+            op = float(p["open"])
+            amt = float(p.get("amount") or qty * op)
+            sign = 1 if p["side"] == "long" else -1
+            pnl = (cur - op) * qty * sign
+            hold += amt
+            float_pnl += pnl
+            rows.append({
+                "metal": metal, "label": label,
+                "side": p["side"], "side_cn": "多" if p["side"] == "long" else "空",
+                "qty": round(qty, 3), "open": round(op, 3),
+                "cur": round(cur, 3), "amount": round(amt, 2),
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl / amt * 100, 2) if amt else 0,
+                "ts": p.get("ts", ""),
+            })
+        realized = sum(float(t.get("pnl") or 0) for t in (d.get("trades") or []))
+        cash = float(d["cash"])
+        equity = cash + hold + float_pnl
+        init = float(d["initial"])
+        ratio = round(au / ag, 2) if ag else 0
+        return {
+            "initial": round(init, 2),
+            "cash": round(cash, 2),
+            "equity": round(equity, 2),
+            "hold": round(hold, 2),
+            "float_pnl": round(float_pnl, 2),
+            "realized": round(realized, 2),
+            "total_pnl": round(equity - init, 2),
+            "total_pct": round((equity / init - 1) * 100, 2) if init else 0,
+            "positions": rows,
+            "trades": (d.get("trades") or [])[:12],
+            "quote": {
+                "gold": {"price": round(au, 3), "chg": gchg},
+                "silver": {"price": round(ag, 3), "chg": schg},
+            },
+            "ratio": ratio,
+            "ts": time.strftime("%H:%M:%S"),
+        }
+
+    def api_gold_sim_open(self, body):
+        metal = "gold" if body.get("metal") == "gold" else "silver"
+        side = "long" if body.get("side") == "long" else "short"
+        try:
+            amount = float(body.get("amount") or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "金额格式不对"}
+        if amount <= 0:
+            return {"ok": False, "error": "金额必须大于 0"}
+        au, ag, _gc, _sc = self._gs_prices()
+        cur = au if metal == "gold" else ag
+        if cur <= 0:
+            return {"ok": False, "error": "行情不可用，稍后再试"}
+        d = self._gs_load()
+        pos = d.setdefault("positions", {})
+        if pos.get(metal):
+            return {"ok": False, "error": "该品种已有持仓，先平掉再开"}
+        if amount > float(d["cash"]) + 0.01:
+            return {"ok": False, "error": "资金不足（可用 %.0f 元）" % float(d["cash"])}
+        qty = amount / cur
+        d["cash"] = float(d["cash"]) - amount
+        pos[metal] = {
+            "side": side, "qty": round(qty, 4), "open": round(cur, 4),
+            "amount": round(amount, 2), "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        d.setdefault("trades", []).insert(0, {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "action": "开仓", "label": self._gs_meta(metal)[1],
+            "side_cn": "多" if side == "long" else "空",
+            "qty": round(qty, 3), "price": round(cur, 3),
+            "amount": round(amount, 2), "pnl": None,
+        })
+        d["trades"] = d["trades"][:200]
+        self._gs_save(d)
+        return {"ok": True, "qty": round(qty, 3), "price": round(cur, 3)}
+
+    def api_gold_sim_close(self, body):
+        metal = "gold" if body.get("metal") == "gold" else "silver"
+        d = self._gs_load()
+        pos = d.get("positions") or {}
+        p = pos.get(metal)
+        if not p:
+            return {"ok": False, "error": "该品种没有持仓"}
+        au, ag, _gc, _sc = self._gs_prices()
+        cur = au if metal == "gold" else ag
+        if cur <= 0:
+            return {"ok": False, "error": "行情不可用，稍后再试"}
+        qty = float(p["qty"])
+        op = float(p["open"])
+        amt = float(p.get("amount") or qty * op)
+        sign = 1 if p["side"] == "long" else -1
+        pnl = (cur - op) * qty * sign
+        d["cash"] = float(d["cash"]) + amt + pnl
+        d.setdefault("trades", []).insert(0, {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "action": "平仓", "label": self._gs_meta(metal)[1],
+            "side_cn": "多" if p["side"] == "long" else "空",
+            "qty": round(qty, 3), "price": round(cur, 3),
+            "amount": round(amt, 2), "pnl": round(pnl, 2),
+        })
+        d["trades"] = d["trades"][:200]
+        pos.pop(metal, None)
+        self._gs_save(d)
+        return {"ok": True, "pnl": round(pnl, 2), "price": round(cur, 3)}
+
+    def api_gold_sim_reset(self, body):
+        try:
+            init = float(body.get("initial") or 100000.0)
+        except (TypeError, ValueError):
+            init = 100000.0
+        if init <= 0:
+            init = 100000.0
+        d = {"initial": init, "cash": init, "positions": {}, "trades": []}
+        self._gs_save(d)
+        return {"ok": True, "initial": init}
 
     def _tv_listening(self):
         return self._tv_cmd("status", timeout=8).startswith("running")
