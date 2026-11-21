@@ -14,8 +14,6 @@
 30 * * * * /opt/astock/venv/bin/python /opt/astock/qbit_stale.py >> /opt/astock/qbit_stale.log 2>&1
 */30 8-23 * * * /usr/bin/python3 /home/astock/.dsh/dsh_wechat/gold_trend.py >/dev/null 2>&1
 0 3 * * 0 /usr/bin/python3 /home/astock/.dsh/dsh_wechat/mem_crypt.py rotate >/dev/null 2>&1
-* * * * * /bin/bash /home/astock/.dsh/dsh_wechat/pdd_mens/autostart.sh >/dev/null 2>&1
-* * * * * /bin/bash /home/astock/.dsh/dsh_wechat/pdd_mens/autostart.sh >/dev/null 2>&1
 0 9,12,15,21 * * 1-5 cd /home/astock/.dsh/dsh_wechat && /home/astock/.dsh/dsh_wechat/.venv_img/bin/python gold_spot.py >/dev/null 2>&1
 40 7 * * * /bin/bash /home/astock/checkin/run.sh
 */10 * * * * /opt/astock/venv/bin/python /opt/astock/gold_push.py --retry-pending >> /opt/astock/gold_push.log 2>&1
@@ -25,3 +23,4 @@
 */30 9-15,21-23 * * 1-5 /usr/bin/python3 /home/astock/.dsh/dsh_wechat/futures/kline_collector.py >> /home/astock/.dsh/dsh_wechat/futures/kline_collector.log 2>&1
 30 15 * * 1-5 cd /home/astock/.dsh/dsh_wechat/futures && /usr/bin/python3 etf_collector.py >> etf_collector.log 2>&1
 0 9 * * * /bin/bash /home/astock/.dsh/dsh_wechat/memory_guard.sh
+30 8 * * * /bin/bash /home/astock/checkin/play_run.sh
