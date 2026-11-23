@@ -24,3 +24,5 @@
 30 15 * * 1-5 cd /home/astock/.dsh/dsh_wechat/futures && /usr/bin/python3 etf_collector.py >> etf_collector.log 2>&1
 0 9 * * * /bin/bash /home/astock/.dsh/dsh_wechat/memory_guard.sh
 30 8 * * * /bin/bash /home/astock/checkin/play_run.sh
+* * * * * /bin/bash /home/astock/probe/temp_mon.sh >/dev/null 2>&1
+* * * * * /bin/date >> /home/astock/probe/cron_test2.log 2>&1

@@ -651,36 +651,41 @@ def auto_trade(d: dict) -> None:
         sig = signal(rows, q["price"], cfg.get("name", "ma"), cfg.get("params") or {})
         if not sig:
             continue
-        # 趋势过滤：价格必须在 MA(N) 同侧，否则本次信号作废
-        filt = int(cfg.get("filter") or 0)
-        if filt:
-            cl = [r["c"] for r in rows] + [q["price"]]
-            if len(cl) < filt:
-                continue
-            mt = sum(cl[-filt:]) / filt
-            if (sig == 1 and q["price"] <= mt) or (sig == -1 and q["price"] >= mt):
-                continue
         pid, pos = position_for(d, contract)
-        f = FUTURES[contract]
         # 最少持仓：不足 N 根 K 线时忽略反向信号（不反手、也不新开）
         mh = int(cfg.get("min_hold") or 0)
         if pos and mh:
             bars_at = pos.get("bars_at_open")
             if bars_at is not None and len(rows) - int(bars_at) < mh:
                 continue
+        # 趋势过滤：价格必须在 MA(N) 同侧，否则本次信号作废。
+        # 注意：只约束"新开仓"，不约束平掉已有反向持仓——
+        # 否则趋势反转时旧仓只能扛到止损（2026-11-23 豆粕空单即此情况）。
+        filt = int(cfg.get("filter") or 0)
+        filt_ok = True
+        if filt:
+            cl = [r["c"] for r in rows] + [q["price"]]
+            if len(cl) < filt:
+                filt_ok = False
+            else:
+                mt = sum(cl[-filt:]) / filt
+                filt_ok = not ((sig == 1 and q["price"] <= mt)
+                               or (sig == -1 and q["price"] >= mt))
+        # 反向信号先平仓（不受过滤限制），过滤只决定要不要反手开新仓
+        if pos and ((sig == 1 and pos["side"] == "short")
+                    or (sig == -1 and pos["side"] == "long")):
+            close_position(d, pid, "（策略反手）" if filt_ok
+                           else "（策略反手·过滤未开新仓）")
+            pid, pos = position_for(d, contract)
+        if not filt_ok:
+            continue
         if sig == 1:  # 多头信号
-            if pos and pos["side"] == "short":
-                close_position(d, pid, "（策略反手）")
-                pid, pos = position_for(d, contract)
             if not pos:
                 res = open_position(d, contract, "long", 1, "（策略自动）")
                 if isinstance(res, dict) and res.get("id"):
                     d["positions"][res["id"]]["bars_at_open"] = len(rows)
                     save_data(d)
         elif sig == -1:  # 空头信号
-            if pos and pos["side"] == "long":
-                close_position(d, pid, "（策略反手）")
-                pid, pos = position_for(d, contract)
             if not pos:
                 res = open_position(d, contract, "short", 1, "（策略自动）")
                 if isinstance(res, dict) and res.get("id"):
