@@ -324,6 +324,33 @@
       "min_hold": 10,
       "trail": 0.6,
       "breakeven": 1.0
+    },
+    "RM": {
+      "name": "rsi",
+      "params": {
+        "period": 6,
+        "low": 30,
+        "high": 70
+      },
+      "period": "day",
+      "enabled": true,
+      "stop_win": 3.0,
+      "stop_loss": 2.0
+    },
+    "RM_60": {
+      "name": "ma",
+      "params": {
+        "fast": 5,
+        "slow": 10
+      },
+      "period": "60",
+      "enabled": true,
+      "stop_win": 3.0,
+      "stop_loss": 1.5,
+      "filter": 40,
+      "min_hold": 10,
+      "trail": 0.6,
+      "breakeven": 1.0
     }
   }
 }

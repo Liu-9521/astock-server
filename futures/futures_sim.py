@@ -65,6 +65,12 @@ FUTURES = {
     # 同一份豆粕合约的第二套策略（60 分钟周期），与 30 分钟版并行对照
     "M_60": {"sym": "M0", "prefix": "M", "name": "豆粕", "label": "豆粕·60分",
              "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
+    # 菜粕·日线：均线/突破在 14 年回测里全亏，唯有 RSI 均值回归稳健
+    "RM": {"sym": "RM0", "prefix": "RM", "name": "菜粕", "label": "菜粕·日线",
+           "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
+    # 菜粕·60分钟：样本仅 8 个月（新浪分钟线最早只到 2026-03），对照观察用
+    "RM_60": {"sym": "RM0", "prefix": "RM", "name": "菜粕", "label": "菜粕·60分",
+              "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
 }
 
 MAIN = {}          # 品种 -> (ts, 主力合约代码)，例如 "C" -> (ts, "C2701")
@@ -109,6 +115,15 @@ def default_data() -> dict:
             # 螺纹钢：30 分钟三档过滤全负，日线 5/20 是 +2966，改日线
             "RB": {"name": "ma", "params": {"fast": 5, "slow": 20}, "period": "day",
                    "enabled": True, "stop_win": 2.0, "stop_loss": 1.0},
+            # 菜粕·日线 RSI：14 年 3370 根回测 10/14 年盈利；
+            # 用高低点触发止损的更严口径仍是 283 笔 胜47% +20744 回撤-5704
+            "RM": {"name": "rsi", "params": {"period": 6, "low": 30, "high": 70},
+                   "period": "day", "enabled": True,
+                   "stop_win": 3.0, "stop_loss": 2.0},
+            # 菜粕·60分钟：8 个月回测 32 笔 +2543，实盘口径缩到 28 笔 +822（前半段亏）
+            "RM_60": {"name": "ma", "params": {"fast": 5, "slow": 10}, "period": "60",
+                      "enabled": True, "stop_win": 3.0, "stop_loss": 1.5,
+                      "filter": 40, "min_hold": 10, "trail": 0.6, "breakeven": 1.0},
         },
     }
 
