@@ -28,6 +28,7 @@ import json
 import re
 import threading
 import time
+import datetime
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,6 +72,14 @@ FUTURES = {
     # 菜粕·60分钟：样本仅 8 个月（新浪分钟线最早只到 2026-03），对照观察用
     "RM_60": {"sym": "RM0", "prefix": "RM", "name": "菜粕", "label": "菜粕·60分",
               "mult": 10, "tick": 1, "margin": 0.10, "night": ("21:00", "23:00")},
+    # PVC·日线：17 年 4246 根回测，4/15 快线在 0/40/60 三档过滤下都正；
+    # 过滤40 + 4%/2% 实盘口径 160 笔 +30483 回撤 -13688
+    "V": {"sym": "V0", "prefix": "V", "name": "PVC", "label": "PVC·日线",
+          "mult": 5, "tick": 1, "margin": 0.08, "night": ("21:00", "23:00")},
+    # PVC·60分钟反向网格：持仓浮亏达 flip% 就平仓并反向开仓，不用止盈止损。
+    # 回测（2026-03~11，8 个月 1023 根）：反手 0.5% → 124 笔 +10359 回撤 -1710 胜29.8%
+    "V_FLIP": {"sym": "V0", "prefix": "V", "name": "PVC", "label": "PVC·网格",
+               "mult": 5, "tick": 1, "margin": 0.08, "night": ("21:00", "23:00")},
 }
 
 MAIN = {}          # 品种 -> (ts, 主力合约代码)，例如 "C" -> (ts, "C2701")
@@ -117,14 +126,27 @@ def default_data() -> dict:
                    "enabled": True, "stop_win": 2.0, "stop_loss": 1.0},
             # 菜粕·日线 RSI：14 年 3370 根回测 10/14 年盈利；
             # 用高低点触发止损的更严口径仍是 283 笔 胜47% +20744 回撤-5704
+            # 长假跳过对它 -41%（均值回归被节前平仓打断），单独关闭
             "RM": {"name": "rsi", "params": {"period": 6, "low": 30, "high": 70},
                    "period": "day", "enabled": True,
-                   "stop_win": 3.0, "stop_loss": 2.0},
+                   "stop_win": 3.0, "stop_loss": 2.0, "holiday": False},
             # 菜粕·60分钟：8 个月回测 32 笔 +2543，实盘口径缩到 28 笔 +822（前半段亏）
             "RM_60": {"name": "ma", "params": {"fast": 5, "slow": 10}, "period": "60",
                       "enabled": True, "stop_win": 3.0, "stop_loss": 1.5,
                       "filter": 40, "min_hold": 10, "trail": 0.6, "breakeven": 1.0},
+            # PVC·日线：4/15 + MA40 过滤 + 4%/2%；17 年 4246 根实盘口径 160 笔 +30483
+            "V": {"name": "ma", "params": {"fast": 4, "slow": 15}, "period": "day",
+                  "enabled": True, "stop_win": 4.0, "stop_loss": 2.0, "filter": 40},
+            # PVC·60分钟反向网格：MA3/15 只决定首次方向，之后浮亏 0.5% 立即反手。
+            # 8 个月回测 124 笔 +10359/-1710，9 个月全正、最大连亏 -723。
+            # 必须关掉止盈止损和过滤，否则会抢在网格反手之前平仓。
+            "V_FLIP": {"name": "ma", "params": {"fast": 3, "slow": 15}, "period": "60",
+                       "enabled": True, "stop_win": 0.0, "stop_loss": 0.0,
+                       "filter": 0, "min_hold": 0, "trail": 0.0, "breakeven": 0.0,
+                       "flip": 0.5, "holiday": 2},
         },
+        # 重点标记：卡片置顶 + 高亮，方便一眼看到主做的品种
+        "starred": ["C_DAY", "C_60", "V"],
     }
 
 
@@ -145,12 +167,46 @@ def load_data() -> dict:
         _defaults = default_data()["strategy"]
         for k in FUTURES:
             st.setdefault(k, dict(_defaults.get(k) or _defaults["C"]))
+        # 重点标记：首次迁移默认标玉米两套；之后用户自己点星增删
+        starred = d.setdefault("starred", ["C_DAY", "C_60", "V"])
+        d["starred"] = [k for k in starred if k in FUTURES]
         return d
 
 
 def save_data(d: dict) -> None:
     with LOCK:
         DATA_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------- 交易日历（长假风控） ----------------
+# 期货休市日（周末以外），按国务院节假日通知每年更新一次；周末一律休市，不必列。
+HOLIDAYS = {
+    "2026-01-01", "2026-01-02",
+    "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-23",
+    "2026-04-06",
+    "2026-05-01", "2026-05-04", "2026-05-05",
+    "2026-06-19",
+    "2026-09-25",
+    "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07",
+    "2027-01-01",
+}
+
+
+def day_of(row):
+    try:
+        return datetime.date.fromisoformat(str((row or {}).get("d") or "")[:10])
+    except Exception:
+        return None
+
+
+def next_open_gap(day):
+    """某交易日收盘后距下一个交易日的日历天数：3=普通周末（周五→周一），>3=长假。"""
+    d = day
+    for n in range(1, 21):
+        d += datetime.timedelta(days=1)
+        if d.weekday() < 5 and d.isoformat() not in HOLIDAYS:
+            return n
+    return 99
 
 
 def log(d: dict, msg: str) -> None:
@@ -393,6 +449,7 @@ def position_for(d: dict, contract: str):
 def account_view(d: dict) -> dict:
     init = float(d["account"]["initial"])
     realized = float(d["account"]["realized"])
+    starred = set(d.get("starred") or [])
     pos_list, margin, floating = [], 0.0, 0.0
     for pid, p in d["positions"].items():
         f = FUTURES[p["contract"]]
@@ -412,6 +469,7 @@ def account_view(d: dict) -> dict:
             "side": "多" if p["side"] == "long" else "空",
             "qty": p["qty"], "open_price": p["open_price"], "price": price,
             "pnl": round(pnl, 2), "margin": round(m, 2), "opened": p["opened"],
+            "star": p["contract"] in starred,
         })
     equity = init + realized + floating
     avail = equity - margin
@@ -439,6 +497,22 @@ def last_signal(contract: str) -> str:
         if f["name"] in msg and ("开多" in msg or "开空" in msg):
             return msg.replace(f["name"], "").strip()[:26]
     return ""
+
+
+def held_bars(rows, pos) -> int | None:
+    """持仓已经走过的 K 线根数。
+
+    用开仓那根 K 线的时间戳在 rows 里定位，不能用 len(rows) 相减：
+    新浪接口返回的是固定根数的滚动窗口，len(rows) 恒定不变。
+    返回 None 表示"无法判定/已滚出窗口"，调用方应视为持有足够久（不限制）。
+    """
+    ob = str(pos.get("open_bar_d") or "")
+    if not ob:
+        return None
+    for i, r in enumerate(rows):
+        if str(r.get("d") or "") == ob:
+            return len(rows) - 1 - i
+    return None
 
 
 def signal_bias(contract: str) -> str:
@@ -479,6 +553,7 @@ def signal_bias(contract: str) -> str:
 
 def quotes_view() -> list:
     d = load_data()
+    starred = set(d.get("starred") or [])
     out = []
     for k, f in FUTURES.items():
         q = quote_for(k)
@@ -510,7 +585,10 @@ def quotes_view() -> list:
             "realized": round(real, 0), "pos_pnl": round(pos_pnl, 0), "pos_qty": pos_qty,
             "total_pnl": round(real + pos_pnl, 0),
             "last_signal": last_signal(k), "bias": signal_bias(k),
+            "star": k in starred,
         })
+    # 重点品种排在最前（稳定排序，其余保持 FUTURES 顺序）
+    out.sort(key=lambda x: 0 if x["star"] else 1)
     return out
 
 
@@ -618,6 +696,9 @@ def auto_trade(d: dict) -> None:
     """按策略信号自动开平仓（每个品种最多 1 个持仓）。"""
     if not in_session():
         return
+    _today = datetime.date.today()
+    if _today.weekday() >= 5 or _today.isoformat() in HOLIDAYS:
+        return  # 周末 / 法定节假日不开工（in_session 只看星期，不看节假日）
     strat_map = d.get("strategy") or {}
     for contract, cfg in strat_map.items():
         if contract not in FUTURES:
@@ -626,7 +707,7 @@ def auto_trade(d: dict) -> None:
         if not q.get("price"):
             continue
         pid, pos = position_for(d, contract)
-        # ---- 止盈 / 止损 ----
+        # ---- 止盈 / 止损 / 移动止损 ----
         if pos:
             pnl_pct = (q["price"] - pos["open_price"]) / pos["open_price"] * 100
             if pos["side"] == "short":
@@ -640,20 +721,84 @@ def auto_trade(d: dict) -> None:
             if pnl_pct > best:
                 best = pnl_pct
                 pos["best"] = round(best, 4)
-            # 当前生效的止损线：固定止损，或浮盈达标后上移（保本 → 跟踪）
-            stop_line = sl
-            if trail and best >= breakeven:
-                stop_line = max(sl, max(0.0, best - trail))
             if sw and pnl_pct >= sw:
                 close_position(d, pid, f"（止盈 {pnl_pct:+.2f}%）")
                 continue
-            if stop_line and pnl_pct <= -stop_line:
-                if trail and best >= breakeven and stop_line > sl:
+            # 移动止损：浮盈从最高点回撤 trail 个百分点就平，锁定不低于保本
+            if trail and best >= breakeven:
+                lock = max(0.0, best - trail)
+                if pnl_pct <= lock:
                     close_position(
                         d, pid,
                         f"（移动止损 浮盈曾达 {best:+.2f}%，现 {pnl_pct:+.2f}%）")
-                else:
-                    close_position(d, pid, f"（止损 {pnl_pct:+.2f}%）")
+                    continue
+            if sl and pnl_pct <= -sl:
+                close_position(d, pid, f"（止损 {pnl_pct:+.2f}%）")
+                continue
+        # ---- 反向网格：浮亏达 flip% 立即平仓并反向开仓（V_FLIP）----
+        # 与回测口径一致：同一根 K 线内最多反手一次（last_bar 记录根数），
+        # 平仓与反向开仓都按当前实时价成交，滑点由实盘承担。
+        flip = float(cfg.get("flip") or 0)
+        if flip and pos:
+            # 网格锚点 flip_ref：反手判定的基准价。跳空时锚点重置到跳空后的开盘价，
+            # 避免"跳空瞬间在恐慌价反手"（回测：无重锚 +2904/-4452，有重锚 +7161/-2572）。
+            ref = float(pos.get("flip_ref") or pos["open_price"])
+            bars_f = get_kline(contract, cfg.get("period", "day"))
+            cur_bar = str(bars_f[-1].get("d") or "") if bars_f else ""
+            if len(bars_f) >= 2 and pos.get("reanchor_bar_d") != cur_bar:
+                last_b, prev_b = bars_f[-1], bars_f[-2]
+                try:
+                    gap_pct = abs(float(last_b["o"]) - float(prev_b["c"])) / float(prev_b["c"]) * 100
+                except Exception:
+                    gap_pct = 0.0
+                line = ref * (1 - flip / 100) if pos["side"] == "long" else ref * (1 + flip / 100)
+                crossed = (float(last_b["o"]) < line) if pos["side"] == "long" else (float(last_b["o"]) > line)
+                if gap_pct >= 0.5 and crossed:
+                    pos["flip_ref"] = float(last_b["o"])
+                    pos["reanchor_bar_d"] = cur_bar
+                    log(d, f"网格跳空重锚 {contract} {pos['side']} "
+                           f"{ref:.1f} -> {float(last_b['o']):.1f}（跳空 {gap_pct:.2f}%）")
+                    save_data(d)
+                    continue
+            fp = (q["price"] - ref) / ref * 100
+            if pos["side"] == "short":
+                fp = -fp
+            if fp <= -flip:
+                # 同一根 K 线内最多反手一次。用 K 线时间戳判断，
+                # 不用根数：新浪返回的根数常恒定（滚动窗口），用 len 差会永久卡死。
+                if pos.get("last_bar_d") != cur_bar:
+                    new_side = "short" if pos["side"] == "long" else "long"
+                    qty = pos["qty"]
+                    close_position(d, pid, f"（反向网格 {fp:+.2f}% 反手）")
+                    res = open_position(d, contract, new_side, qty, "（反向网格反手）")
+                    if isinstance(res, dict) and res.get("id"):
+                        p2 = d["positions"][res["id"]]
+                        p2["bars_at_open"] = len(bars_f)
+                        p2["last_bar"] = len(bars_f)
+                        p2["last_bar_d"] = cur_bar
+                        p2["open_bar_d"] = cur_bar
+                        p2["flip_ref"] = p2.get("open_price")
+                        save_data(d)
+                    continue
+        elif flip and not pos:
+            # 网格空仓：不等金叉死叉，按当前快慢线排列直接开首仓，网格才有起点
+            rows_f = get_kline(contract, cfg.get("period", "day"))
+            ps = cfg.get("params") or {}
+            nf, ns = int(ps.get("fast", 3)), int(ps.get("slow", 15))
+            if len(rows_f) >= ns:
+                cl = [r["c"] for r in rows_f] + [q["price"]]
+                mf = sum(cl[-nf:]) / nf
+                ms = sum(cl[-ns:]) / ns
+                side = "long" if mf >= ms else "short"
+                res = open_position(d, contract, side, 1, "（反向网格首仓）")
+                if isinstance(res, dict) and res.get("id"):
+                    p2 = d["positions"][res["id"]]
+                    p2["bars_at_open"] = len(rows_f)
+                    p2["last_bar"] = len(rows_f)
+                    p2["last_bar_d"] = str(rows_f[-1].get("d") or "")
+                    p2["open_bar_d"] = str(rows_f[-1].get("d") or "")
+                    p2["flip_ref"] = p2.get("open_price")
+                    save_data(d)
                 continue
         # 策略停用：立即平掉该策略的存量持仓，不留孤儿仓位
         if not cfg.get("enabled", True):
@@ -663,15 +808,34 @@ def auto_trade(d: dict) -> None:
         rows = get_kline(contract, cfg.get("period", "day"))
         if not rows:
             continue
+        pid, pos = position_for(d, contract)
+        # ---- 长假风控：节前平仓停手，节后首日只平不追 ----
+        # holiday: 不设 = 日线关闭、分钟线阈值2（连普通周末一起平）；false 关闭；
+        #          true = 阈值3（只跳长假）；数字 = 自定义阈值
+        post_holiday = False
+        hv = cfg.get("holiday")
+        if hv is None:
+            hv = 2 if cfg.get("period") != "day" else False
+        if hv not in (False, None) and len(rows) >= 2:
+            thr = 3 if hv is True else int(hv)
+            cur_d, prev_d = day_of(rows[-1]), day_of(rows[-2])
+            cut = "14:50" if cfg.get("period") == "day" else "14:30"
+            if next_open_gap(_today) > thr and time.strftime("%H:%M") >= cut:
+                if pos:
+                    close_position(d, pid, "（长假前平仓）")
+                continue  # 当天剩余时间不再开新仓
+            if cur_d and prev_d:
+                post_holiday = (cur_d - prev_d).days > thr
         sig = signal(rows, q["price"], cfg.get("name", "ma"), cfg.get("params") or {})
         if not sig:
             continue
         pid, pos = position_for(d, contract)
-        # 最少持仓：不足 N 根 K 线时忽略反向信号（不反手、也不新开）
+        # 最少持仓：不足 N 根 K 线时忽略反向信号（不反手、也不新开）。
+        # 用 held_bars() 按"开仓 K 线时间戳"算差值；存量持仓无 open_bar_d 时视为已满足。
         mh = int(cfg.get("min_hold") or 0)
         if pos and mh:
-            bars_at = pos.get("bars_at_open")
-            if bars_at is not None and len(rows) - int(bars_at) < mh:
+            held = held_bars(rows, pos)
+            if held is not None and held < mh:
                 continue
         # 趋势过滤：价格必须在 MA(N) 同侧，否则本次信号作废。
         # 注意：只约束"新开仓"，不约束平掉已有反向持仓——
@@ -687,11 +851,18 @@ def auto_trade(d: dict) -> None:
                 filt_ok = not ((sig == 1 and q["price"] <= mt)
                                or (sig == -1 and q["price"] >= mt))
         # 反向信号先平仓（不受过滤限制），过滤只决定要不要反手开新仓
+        cur_bar = str(rows[-1].get("d") or "")
         if pos and ((sig == 1 and pos["side"] == "short")
                     or (sig == -1 and pos["side"] == "long")):
+            if pos.get("last_bar_d") == cur_bar:
+                # 同一根 K 线内已经反手过一次，避免 10 秒轮询随价格抖动反复翻向
+                continue
             close_position(d, pid, "（策略反手）" if filt_ok
                            else "（策略反手·过滤未开新仓）")
             pid, pos = position_for(d, contract)
+        # 节后首日不追：只允许反向信号平仓，不反手、不开新仓
+        if post_holiday:
+            filt_ok = False
         if not filt_ok:
             continue
         if sig == 1:  # 多头信号
@@ -699,12 +870,18 @@ def auto_trade(d: dict) -> None:
                 res = open_position(d, contract, "long", 1, "（策略自动）")
                 if isinstance(res, dict) and res.get("id"):
                     d["positions"][res["id"]]["bars_at_open"] = len(rows)
+                    d["positions"][res["id"]]["last_bar"] = len(rows)
+                    d["positions"][res["id"]]["last_bar_d"] = cur_bar
+                    d["positions"][res["id"]]["open_bar_d"] = cur_bar
                     save_data(d)
         elif sig == -1:  # 空头信号
             if not pos:
                 res = open_position(d, contract, "short", 1, "（策略自动）")
                 if isinstance(res, dict) and res.get("id"):
                     d["positions"][res["id"]]["bars_at_open"] = len(rows)
+                    d["positions"][res["id"]]["last_bar"] = len(rows)
+                    d["positions"][res["id"]]["last_bar_d"] = cur_bar
+                    d["positions"][res["id"]]["open_bar_d"] = cur_bar
                     save_data(d)
 
 
@@ -781,6 +958,11 @@ PAGE = """<!DOCTYPE html>
 .wrap{max-width:1000px;margin:0 auto;padding:16px}
 h1{font-size:18px;margin:0 0 2px}.sub{color:var(--dim);font-size:12px;margin-bottom:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+.sitem.star{border-left:3px solid #f5c518;padding-left:11px;background:linear-gradient(90deg,rgba(245,197,24,.07),transparent 65%)}
+.star-t{font-size:15px;cursor:pointer;color:#5a6672;line-height:1;user-select:none;flex:none}
+.star-t.on{color:#f5c518}
+body.ro .star-t{cursor:default}
+tr.starrow td{background:rgba(245,197,24,.05)}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px}
 .m{background:#0d1319;border:1px solid var(--line);border-radius:8px;padding:10px}
 .m .k{color:var(--dim);font-size:11px}.m .v{font-size:17px;font-weight:600;margin-top:2px}
@@ -925,6 +1107,7 @@ function renderStrategy(){
   const ro = window.__RO__ === true;
   const paramsTxt = q => Object.entries(q.params||{}).map(function(kv){return kv[0]+'='+kv[1]}).join(',');
   const head = q => `<div class="cardhead">
+        <span class="star-t${q.star?' on':''}" ${ro?'':'data-star="'+q.contract+'"'} title="标记为重点（置顶并高亮）">${q.star?'★':'☆'}</span>
         <b>${q.name}</b>
         <span>${fmt(q.price,2)} <span class="${sign(q.chg)}">${q.chg>0?'+':''}${fmt(q.chg,2)}%</span></span>
         <span class="hint">盈亏 <span class="${sign(q.total_pnl)}">${q.total_pnl>0?'+':''}${fmt(q.total_pnl,0)}</span>${q.pos_qty?` ｜ 持仓 ${q.pos_qty}手 <span class="${sign(q.pos_pnl)}">${q.pos_pnl>0?'+':''}${fmt(q.pos_pnl,0)}</span>`:''}</span>
@@ -932,7 +1115,7 @@ function renderStrategy(){
       </div>`;
   const tail = q => `<div class="sigline">最近信号：${q.last_signal||'—'} ｜ 当前：${q.bias||'—'}</div>`;
   const card = q => ro ? `
-    <div style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--line)">
+    <div class="sitem${q.star?' star':''}" style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--line)">
       ${head(q)}
       <div class="frow">
         <span class="fgroup">开仓</span>
@@ -951,7 +1134,7 @@ function renderStrategy(){
       </div>
       ${tail(q)}
     </div>` : `
-    <div style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--line)">
+    <div class="sitem${q.star?' star':''}" style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--line)">
       ${head(q)}
       <div class="frow">
         <span class="fgroup">开仓</span>
@@ -991,11 +1174,18 @@ function renderStrategy(){
       </div>
       ${tail(q)}
     </div>`;
-  const onQ = QUOTES.filter(function(q){return q.enabled;});
-  const offQ = QUOTES.filter(function(q){return !q.enabled;});
+  // 重点品种置顶（后端已排序，这里再稳一次，防止只读模式拿到旧缓存）
+  const sorted = QUOTES.slice().sort(function(a,b){ return (b.star?1:0)-(a.star?1:0); });
+  const onQ = sorted.filter(function(q){return q.enabled;});
+  const offQ = sorted.filter(function(q){return !q.enabled;});
   $('#strategyBox').innerHTML = onQ.map(card).join('') +
     (offQ.length ? '<details class="offbox"><summary>已停用 ' + offQ.length + ' 套策略 · 点开可查看参数或重新启用</summary>' + offQ.map(card).join('') + '</details>' : '');
   if(ro) return;
+  document.querySelectorAll('[data-star]').forEach(el => el.onclick = async () => {
+    await fetch('/api/star', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({contract: el.dataset.star})});
+    load();
+  });
   document.querySelectorAll('[data-save]').forEach(b => b.onclick = async () => {
     const ct = b.dataset.save;
     const get = k => document.querySelector(`[data-ct="${ct}"][data-k="${k}"]`);
@@ -1042,8 +1232,8 @@ function renderStrategy(){
 function renderPos(list) {
   if (!list.length) { $('#posBox').innerHTML = '<div class="hint" style="padding:10px">无持仓</div>'; return; }
   $('#posBox').innerHTML = `<table><thead><tr><th>策略</th><th>方向</th><th>手数</th><th>开仓价</th><th>现价</th><th>浮动盈亏</th><th>保证金</th><th>操作</th></tr></thead><tbody>${
-    list.map(p => `<tr>
-      <td><b>${p.label||p.name}</b><span class="hint"> · ${p.main||''}@${fmt(p.open_price,2)}</span></td><td class="${p.side==='多'?'up':'down'}">${p.side}</td><td>${p.qty}</td>
+    list.map(p => `<tr class="${p.star?'starrow':''}">
+      <td><b>${p.star?'<span style="color:#f5c518;margin-right:4px">★</span>':''}${p.label||p.name}</b><span class="hint"> · ${p.main||''}@${fmt(p.open_price,2)}</span></td><td class="${p.side==='多'?'up':'down'}">${p.side}</td><td>${p.qty}</td>
       <td>${fmt(p.open_price,2)}</td><td>${fmt(p.price,2)}</td>
       <td class="${sign(p.pnl)}">${fmt(p.pnl,0)}</td><td>${fmt(p.margin,0)}</td>
       <td><button class="ghost" data-close="${p.id}">平仓</button></td></tr>`).join('')
@@ -1330,6 +1520,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "只读模式，仅内网可操作"}, 403)
         body = self._body()
         d = load_data()
+        if u.path == "/api/star":
+            ct = str(body.get("contract") or "")
+            if ct not in FUTURES:
+                return self._json({"error": "未知合约"}, 400)
+            lst = d.setdefault("starred", [])
+            if ct in lst:
+                lst.remove(ct)
+                log(d, f"{FUTURES[ct]['name']} 取消重点标记")
+            else:
+                lst.append(ct)
+                log(d, f"{FUTURES[ct]['name']} 标记为重点")
+            save_data(d)
+            return self._json({"ok": True, "starred": lst})
         if u.path == "/api/strategy":
             ct = str(body.get("contract") or "")
             if ct not in FUTURES:
