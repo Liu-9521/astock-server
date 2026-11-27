@@ -582,6 +582,8 @@ def quotes_view() -> list:
             "filter": st.get("filter", 0),
             "trail": st.get("trail", 0), "breakeven": st.get("breakeven", 1.0),
             "min_hold": st.get("min_hold", 0),
+            # flip/holiday 必须回传，否则网页保存时读到 undefined 会把网格配置清成 0
+            "flip": st.get("flip", 0), "holiday": st.get("holiday"),
             "realized": round(real, 0), "pos_pnl": round(pos_pnl, 0), "pos_qty": pos_qty,
             "total_pnl": round(real + pos_pnl, 0),
             "last_signal": last_signal(k), "bias": signal_bias(k),
@@ -735,6 +737,28 @@ def auto_trade(d: dict) -> None:
             if sl and pnl_pct <= -sl:
                 close_position(d, pid, f"（止损 {pnl_pct:+.2f}%）")
                 continue
+        # 策略停用：立即平掉该策略的存量持仓，不留孤儿仓位。
+        # 必须排在反向网格之前，否则停用的网格策略仍会先开首仓再被平掉，形成反复开平。
+        if not cfg.get("enabled", True):
+            if pos:
+                close_position(d, pid, "（策略停用自动平仓）")
+            continue
+        # ---- 长假/周末：节前平仓停手 ----
+        # 必须在反向网格之前判断：否则网格平仓后下一轮（10 秒）发现空仓，
+        # 会在 flip 块里立刻重开首仓，形成"平仓→开仓→平仓"死循环（2026-11-27 修）。
+        halt = False
+        hv = cfg.get("holiday")
+        if hv is None:
+            hv = 2 if cfg.get("period") != "day" else False
+        if hv not in (False, None):
+            thr = 3 if hv is True else int(hv)
+            cut = "14:50" if cfg.get("period") == "day" else "14:30"
+            if next_open_gap(_today) > thr and time.strftime("%H:%M") >= cut:
+                halt = True
+        if halt:
+            if pos:
+                close_position(d, pid, "（长假前平仓）")
+            continue  # 当天剩余时间不再开新仓（含网格首仓）
         # ---- 反向网格：浮亏达 flip% 立即平仓并反向开仓（V_FLIP）----
         # 与回测口径一致：同一根 K 线内最多反手一次（last_bar 记录根数），
         # 平仓与反向开仓都按当前实时价成交，滑点由实盘承担。
@@ -800,30 +824,15 @@ def auto_trade(d: dict) -> None:
                     p2["flip_ref"] = p2.get("open_price")
                     save_data(d)
                 continue
-        # 策略停用：立即平掉该策略的存量持仓，不留孤儿仓位
-        if not cfg.get("enabled", True):
-            if pos:
-                close_position(d, pid, "（策略停用自动平仓）")
-            continue
         rows = get_kline(contract, cfg.get("period", "day"))
         if not rows:
             continue
         pid, pos = position_for(d, contract)
-        # ---- 长假风控：节前平仓停手，节后首日只平不追 ----
-        # holiday: 不设 = 日线关闭、分钟线阈值2（连普通周末一起平）；false 关闭；
-        #          true = 阈值3（只跳长假）；数字 = 自定义阈值
+        # ---- 节后首日：只允许反向信号平仓，不反手、不开新仓 ----
         post_holiday = False
-        hv = cfg.get("holiday")
-        if hv is None:
-            hv = 2 if cfg.get("period") != "day" else False
         if hv not in (False, None) and len(rows) >= 2:
             thr = 3 if hv is True else int(hv)
             cur_d, prev_d = day_of(rows[-1]), day_of(rows[-2])
-            cut = "14:50" if cfg.get("period") == "day" else "14:30"
-            if next_open_gap(_today) > thr and time.strftime("%H:%M") >= cut:
-                if pos:
-                    close_position(d, pid, "（长假前平仓）")
-                continue  # 当天剩余时间不再开新仓
             if cur_d and prev_d:
                 post_holiday = (cur_d - prev_d).days > thr
         sig = signal(rows, q["price"], cfg.get("name", "ma"), cfg.get("params") or {})
@@ -1166,6 +1175,8 @@ function renderStrategy(){
           <input data-ct="${q.contract}" data-k="breakeven" type="number" step="0.1" value="${q.breakeven||0}"></label>
         <label class="fi"><i>最少持</i>
           <input data-ct="${q.contract}" data-k="min_hold" type="number" step="1" value="${q.min_hold||0}" style="min-width:56px;max-width:64px"></label>
+        <label class="fi"><i>网格反手%</i>
+          <input data-ct="${q.contract}" data-k="flip" type="number" step="0.1" value="${q.flip||0}" style="min-width:56px;max-width:64px" title="0=不启用网格；非0时浮亏达该百分比即平仓反向"></label>
       </div>
       <div class="frow">
         <span class="fgroup">状态</span>
@@ -1205,6 +1216,7 @@ function renderStrategy(){
       trail: Number(get('trail').value) || 0,
       breakeven: Number(get('breakeven').value) || 0,
       min_hold: Number(get('min_hold').value) || 0,
+      flip: Number(get('flip').value) || 0,
       enabled: get('enabled').checked
     };
     await fetch('/api/strategy', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -1224,6 +1236,7 @@ function renderStrategy(){
         filter: Number(get('filter').value)||0,
         trail: Number(get('trail').value)||0, breakeven: Number(get('breakeven').value)||0,
         min_hold: Number(get('min_hold').value)||0,
+        flip: Number(get('flip').value)||0,
         enabled: false})});
     load();
   });
@@ -1541,15 +1554,23 @@ class Handler(BaseHTTPRequestHandler):
             if name not in STRATEGIES:
                 return self._json({"error": "未知策略"}, 400)
             params = body.get("params") or dict(STRATEGIES[name]["params"])
-            d["strategy"][ct] = {"name": name, "params": params,
-                                 "period": str(body.get("period") or "day"),
-                                 "enabled": bool(body.get("enabled", True)),
-                                 "stop_win": float(body.get("stop_win") or 0),
-                                 "stop_loss": float(body.get("stop_loss") or 0),
-                                 "filter": int(body.get("filter") or 0),
-                                 "trail": float(body.get("trail") or 0),
-                                 "breakeven": float(body.get("breakeven") or 1.0),
-                                 "min_hold": int(body.get("min_hold") or 0)}
+            # 以现有配置为基底再覆盖表单字段：flip / holiday 等不在表单里的键必须保留，
+            # 否则在网页上点一次"保存/停用"就会把网格策略的 flip 抹掉，变成普通均线策略。
+            cfg_new = dict(d["strategy"].get(ct) or {})
+            cfg_new.update({
+                "name": name, "params": params,
+                "period": str(body.get("period") or "day"),
+                "enabled": bool(body.get("enabled", True)),
+                "stop_win": float(body.get("stop_win") or 0),
+                "stop_loss": float(body.get("stop_loss") or 0),
+                "filter": int(body.get("filter") or 0),
+                "trail": float(body.get("trail") or 0),
+                "breakeven": float(body.get("breakeven") or 1.0),
+                "min_hold": int(body.get("min_hold") or 0),
+            })
+            if body.get("flip") is not None:
+                cfg_new["flip"] = float(body.get("flip") or 0)
+            d["strategy"][ct] = cfg_new
             log(d, f"{FUTURES[ct]['name']} 策略改为 {STRATEGIES[name]['label']} {params}")
             save_data(d)
             return self._json({"ok": True})
